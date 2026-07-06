@@ -1,0 +1,23 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Data / DB
+sqlmodel==0.0.22
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Env
+python-dotenv==1.0.1
+
+# HTTP client for provider APIs
+httpx==0.28.1
+
+# Media placeholder generation (offline fallback for images)
+Pillow==11.1.0
+
+# Optional provider SDKs (imported lazily; app runs without them).
+# 0.116+ is required for the `output_config` structured-output parameter used
+# by the script-generation adapter.
+anthropic==0.116.0

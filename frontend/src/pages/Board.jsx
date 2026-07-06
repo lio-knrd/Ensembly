@@ -1,0 +1,189 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, mediaUrl } from "../api.js";
+import { COLUMNS, columnForStage } from "../stages.js";
+import StatusPill from "../components/StatusPill.jsx";
+import Modal from "../components/Modal.jsx";
+
+export default function Board() {
+  const [showNew, setShowNew] = useState(false);
+  const { data: projects = [], isLoading } = useQuery({
+    queryKey: ["projects"],
+    queryFn: api.listProjects,
+    refetchInterval: 4000,
+  });
+
+  const byColumn = Object.fromEntries(COLUMNS.map((c) => [c.key, []]));
+  for (const p of projects) byColumn[columnForStage(p.stage)].push(p);
+
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>Board</h1>
+          <p>Every project, across the pipeline.</p>
+        </div>
+        <button className="btn primary" onClick={() => setShowNew(true)}>
+          + New Project
+        </button>
+      </div>
+
+      {isLoading ? (
+        <div className="empty">Loading…</div>
+      ) : projects.length === 0 ? (
+        <div className="empty">
+          No projects yet. Create one to start the pipeline.
+        </div>
+      ) : (
+        <div className="board">
+          {COLUMNS.map((col) => (
+            <div className="column" key={col.key}>
+              <div className="column-head">
+                <h3>{col.label}</h3>
+                <span className="column-count">{byColumn[col.key].length}</span>
+              </div>
+              <div className="column-body">
+                {byColumn[col.key].map((p) => (
+                  <ProjectCard key={p.id} project={p} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showNew && <NewProjectModal onClose={() => setShowNew(false)} />}
+    </>
+  );
+}
+
+function ProjectCard({ project }) {
+  const navigate = useNavigate();
+  const thumb = mediaUrl(project.thumbnail);
+  return (
+    <div className="card" onClick={() => navigate(`/project/${project.id}`)}>
+      <div
+        className="card-thumb"
+        style={thumb ? { backgroundImage: `url(${thumb})` } : undefined}
+      >
+        {!thumb && "no preview yet"}
+      </div>
+      <div className="card-body">
+        <p className="card-title">{project.title}</p>
+        <div className="card-meta">
+          <StatusPill stage={project.stage} />
+          <span className="card-duration">{project.target_duration_seconds}s</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewProjectModal({ onClose }) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [title, setTitle] = useState("");
+  const [topic, setTopic] = useState("");
+  const [duration, setDuration] = useState(75);
+
+  const { data: platforms = [] } = useQuery({
+    queryKey: ["platformPresets"],
+    queryFn: api.listPlatformPresets,
+  });
+  const { data: contents = [] } = useQuery({
+    queryKey: ["contentPresets"],
+    queryFn: api.listContentPresets,
+  });
+  const [platformId, setPlatformId] = useState("");
+  const [contentId, setContentId] = useState("");
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.createProject({
+        title: title || topic,
+        topic_prompt: topic,
+        target_duration_seconds: Number(duration),
+        platform_preset_id: platformId || null,
+        content_preset_id: contentId || null,
+      }),
+    onSuccess: (p) => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      onClose();
+      navigate(`/project/${p.id}`);
+    },
+  });
+
+  return (
+    <Modal title="New project" onClose={onClose}>
+      <div className="field">
+        <label>Topic / idea</label>
+        <input
+          autoFocus
+          placeholder="e.g. Theseus and the Minotaur"
+          value={topic}
+          onChange={(e) => setTopic(e.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label>Working title (optional)</label>
+        <input
+          placeholder="Defaults to the topic"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+      </div>
+      <div className="inline-fields">
+        <div className="field">
+          <label>Target duration (seconds)</label>
+          <input
+            type="number"
+            min="15"
+            max="600"
+            value={duration}
+            onChange={(e) => setDuration(e.target.value)}
+          />
+        </div>
+      </div>
+      <div className="inline-fields">
+        <div className="field">
+          <label>Platform preset</label>
+          <select value={platformId} onChange={(e) => setPlatformId(e.target.value)}>
+            <option value="">Default</option>
+            {platforms.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+                {p.is_default ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>Content preset</label>
+          <select value={contentId} onChange={(e) => setContentId(e.target.value)}>
+            <option value="">Default</option>
+            {contents.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+                {c.is_default ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {create.isError && <div className="banner">{String(create.error.message)}</div>}
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          className="btn primary"
+          disabled={!topic.trim() || create.isPending}
+          onClick={() => create.mutate()}
+        >
+          {create.isPending ? "Creating…" : "Create & generate script"}
+        </button>
+      </div>
+    </Modal>
+  );
+}

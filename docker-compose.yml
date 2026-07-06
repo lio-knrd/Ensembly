@@ -1,0 +1,11 @@
+# Optional convenience — `docker compose up --build` then open http://localhost:8420
+services:
+  studio:
+    build: .
+    ports:
+      - "8420:8420"
+    env_file:
+      - .env
+    volumes:
+      # Persist generated media + the SQLite db across container restarts.
+      - ./data:/app/data
