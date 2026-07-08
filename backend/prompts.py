@@ -33,7 +33,12 @@ For each scene you must provide:
     styles, or aesthetic labels; the visual style is applied later from the \
     active content preset. If named characters appear, include their exact names \
     and role/action in the image_prompt so downstream image and video models can \
-    match them to their reference images. Do not reference other scenes.
+    match them to their reference images. Only when a later scene genuinely needs \
+    a previously established prop, location, costume detail, symbol, vehicle, \
+    artifact, or environment to stay visually consistent, describe that recurring \
+    element again with the same concrete visual traits. Do not carry over unrelated \
+    earlier scene details, and do not reference other scenes by number; make each \
+    prompt usable on its own.
   - scene_type: either "still" or "video". Default to "still". Mark a small \
     number of pivotal "hero" moments as "video" when motion would add real impact.
   - characters: a list of named characters that appear in this scene (e.g. \
@@ -78,7 +83,11 @@ def build_script_prompt(
         "scene content, mood, composition, lighting, and framing. Do not include "
         "art style words because image/video style is applied separately from "
         "the content preset. When a scene includes characters, put their exact "
-        "names and clear actions/positions in the image_prompt.",
+        "names and clear actions/positions in the image_prompt. Only when later "
+        "scenes genuinely continue earlier props, places, artifacts, costumes, "
+        "or other context-bound objects that must stay visually consistent, "
+        "repeat those elements with the same concrete visual traits. Do not "
+        "carry over unrelated earlier scene details.",
     ]
     return "\n".join(parts)
 

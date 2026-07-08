@@ -7,6 +7,7 @@ be re-run for a single scene or the whole project without restarting from IDEA.
 from __future__ import annotations
 
 import json
+import re
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -42,6 +43,49 @@ from .storage import project_folder
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs_by_project: dict[str, set[Future]] = {}
 _jobs_lock = Lock()
+
+_CONTINUITY_STOPWORDS = {
+    "about",
+    "above",
+    "action",
+    "across",
+    "after",
+    "again",
+    "against",
+    "background",
+    "behind",
+    "camera",
+    "close",
+    "composition",
+    "dramatic",
+    "during",
+    "environment",
+    "faces",
+    "framing",
+    "front",
+    "glowing",
+    "high",
+    "image",
+    "light",
+    "lighting",
+    "medium",
+    "moment",
+    "mood",
+    "people",
+    "person",
+    "scene",
+    "short",
+    "showing",
+    "stands",
+    "story",
+    "style",
+    "subject",
+    "through",
+    "view",
+    "visual",
+    "while",
+    "with",
+}
 
 
 def submit(fn, *args) -> None:
@@ -759,14 +803,20 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
     session.commit()
 
     character_refs = _scene_character_refs(session, scene)
-    refs = [ref["path"] for ref in character_refs]
+    continuity_refs = _scene_continuity_refs(session, project, scene)
+    refs = [ref["path"] for ref in character_refs] + [ref["path"] for ref in continuity_refs]
 
     out = folder / "images" / f"scene_{scene.order_index + 1:02d}.png"
-    ref_label = "style reference image" if getattr(img, "name", "") == "krea" else "reference image"
-    prompt = _apply_character_context(
-        _apply_style(scene.image_prompt, _content_style(session, project)),
-        character_refs,
+    ref_label = "style reference image" if getattr(img, "name", "") == "krea" else "reference image panel"
+    prompt = _apply_continuity_context(
+        _apply_character_context(
+            _apply_style(scene.image_prompt, _content_style(session, project)),
+            character_refs,
+            ref_label,
+        ),
+        continuity_refs,
         ref_label,
+        len(character_refs),
     )
     result = img.generate(prompt, out, refs or None)
     if _stop_if_canceled(session, project):
@@ -801,6 +851,66 @@ def _scene_character_refs(session, scene: Scene) -> list[dict]:
     return refs
 
 
+def _scene_continuity_refs(session, project: Project, scene: Scene, limit: int = 3) -> list[dict]:
+    """Relevant earlier scene images for recurring props, locations, or environments."""
+    root = Path(settings.projects_dir.parent.parent)
+    previous = session.exec(
+        select(Scene)
+        .where(
+            Scene.project_id == project.id,
+            Scene.order_index < scene.order_index,
+            Scene.image_path.is_not(None),
+        )
+        .order_by(Scene.order_index)
+    ).all()
+
+    current_terms = _continuity_terms(scene.image_prompt)
+    current_phrases = _continuity_phrases(scene.image_prompt)
+    candidates: list[tuple[int, int, dict]] = []
+    for prev in previous:
+        path = root / prev.image_path
+        if not path.exists():
+            continue
+        prev_terms = _continuity_terms(prev.image_prompt)
+        prev_phrases = _continuity_phrases(prev.image_prompt)
+        shared_terms = current_terms & prev_terms
+        shared_phrases = current_phrases & prev_phrases
+        score = len(shared_terms) + (3 * len(shared_phrases))
+
+        # Keep this intentionally narrow: a single generic repeated word is not
+        # enough to attach a whole previous scene as visual context.
+        if not shared_phrases and len(shared_terms) < 3:
+            continue
+
+        candidates.append((score, prev.order_index, {
+            "scene_number": prev.order_index + 1,
+            "prompt": prev.image_prompt,
+            "path": path,
+            "matches": sorted(shared_phrases) or sorted(shared_terms),
+        }))
+    selected = sorted(candidates, key=lambda item: (-item[0], -item[1]))[:limit]
+    return [ref for _, _, ref in sorted(selected, key=lambda item: item[1])]
+
+
+def _continuity_terms(text: str) -> set[str]:
+    words = re.findall(r"[a-zA-Z][a-zA-Z'-]{3,}", text.lower())
+    return {
+        word.strip("'-")
+        for word in words
+        if word.strip("'-") and word.strip("'-") not in _CONTINUITY_STOPWORDS
+    }
+
+
+def _continuity_phrases(text: str) -> set[str]:
+    words = [word for word in re.findall(r"[a-zA-Z][a-zA-Z'-]{3,}", text.lower())]
+    terms = [word.strip("'-") for word in words if word.strip("'-") not in _CONTINUITY_STOPWORDS]
+    phrases: set[str] = set()
+    for size in (2, 3):
+        for idx in range(0, max(0, len(terms) - size + 1)):
+            phrases.add(" ".join(terms[idx:idx + size]))
+    return phrases
+
+
 def _apply_character_context(prompt: str, character_refs: list[dict], label: str) -> str:
     if not character_refs:
         return prompt
@@ -815,6 +925,36 @@ def _apply_character_context(prompt: str, character_refs: list[dict], label: str
         f"{mapping}\n"
         f"Use the named characters exactly as mapped above, keep identities consistent, "
         f"and do not swap characters when multiple people appear."
+    )
+
+
+def _apply_continuity_context(
+    prompt: str,
+    continuity_refs: list[dict],
+    label: str,
+    start_index: int,
+) -> str:
+    if not continuity_refs:
+        return prompt
+    lines = []
+    for offset, ref in enumerate(continuity_refs, start=1):
+        attached_index = start_index + offset
+        matches = ", ".join(ref.get("matches", [])[:5])
+        match_note = f" matching: {matches} -" if matches else ""
+        lines.append(
+            f"{attached_index}. Scene {ref['scene_number']} continuity reference -{match_note} "
+            f"{ref['prompt']}"
+        )
+    mapping = "\n".join(lines)
+    return (
+        f"{prompt.strip()}\n\n"
+        f"Visual continuity map (mandatory): attached {label}s after the character "
+        f"references show earlier scenes in this story:\n"
+        f"{mapping}\n"
+        f"Carry forward any recurring context-bound props, costumes, architecture, "
+        f"landmarks, lighting logic, and spatial relationships that still belong in "
+        f"this moment. Do not introduce contradictions to established objects unless "
+        f"the current scene explicitly changes them."
     )
 
 

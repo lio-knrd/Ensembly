@@ -9,6 +9,7 @@ import base64
 import hashlib
 import time
 import textwrap
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -26,8 +27,9 @@ class FalImageGenerator(ImageGenerator):
     def generate(self, prompt, out_path: Path, reference_images=None):
         payload: dict = {"prompt": prompt, "image_size": {"width": WIDTH, "height": HEIGHT}}
         if reference_images:
-            # For models that accept identity references (best-effort).
-            payload["image_url"] = _to_data_uri(reference_images[0])
+            # This endpoint accepts one image field; pack multiple refs into a
+            # numbered contact sheet so characters and continuity refs arrive together.
+            payload["image_url"] = _reference_data_uri(reference_images)
         resp = httpx.post(
             f"https://fal.run/{settings.fal_image_model}",
             headers={"Authorization": f"Key {settings.fal_api_key}"},
@@ -107,6 +109,41 @@ def _to_data_uri(path: Path) -> str:
     b64 = base64.b64encode(data).decode()
     suffix = Path(path).suffix.lstrip(".") or "png"
     return f"data:image/{suffix};base64,{b64}"
+
+
+def _reference_data_uri(paths: list[Path]) -> str:
+    if len(paths) == 1:
+        return _to_data_uri(paths[0])
+
+    from PIL import Image, ImageDraw, ImageOps
+
+    refs = []
+    for path in paths[:10]:
+        try:
+            refs.append(Image.open(path).convert("RGB"))
+        except OSError:
+            continue
+    if not refs:
+        return _to_data_uri(paths[0])
+
+    cols = min(5, len(refs))
+    rows = (len(refs) + cols - 1) // cols
+    cell_w, cell_h = 320, 420
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), (18, 18, 18))
+    draw = ImageDraw.Draw(sheet)
+
+    for idx, image in enumerate(refs, start=1):
+        x = ((idx - 1) % cols) * cell_w
+        y = ((idx - 1) // cols) * cell_h
+        thumb = ImageOps.fit(image, (cell_w, cell_h), method=Image.Resampling.LANCZOS)
+        sheet.paste(thumb, (x, y))
+        draw.rectangle((x + 10, y + 10, x + 58, y + 48), fill=(0, 0, 0))
+        draw.text((x + 24, y + 17), str(idx), fill=(255, 255, 255))
+
+    buf = BytesIO()
+    sheet.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
 
 
 def _queue_submit(endpoint: str, payload: dict) -> dict:
