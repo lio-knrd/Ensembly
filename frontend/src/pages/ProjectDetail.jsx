@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
 import { COLUMNS, columnForStage, isGenerating, stageLabel } from "../stages.js";
@@ -7,9 +7,19 @@ import StatusPill from "../components/StatusPill.jsx";
 
 export default function ProjectDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
+  const qc = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: ["project", id],
     queryFn: () => api.getProject(id),
+  });
+  const del = useMutation({
+    mutationFn: () => api.deleteProject(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.removeQueries({ queryKey: ["project", id] });
+      navigate("/");
+    },
   });
 
   if (isLoading || !data) return <div className="empty">Loading…</div>;
@@ -39,7 +49,19 @@ export default function ProjectDetail() {
             {project.voice_name && <span className="tag">Voice: {project.voice_name}</span>}
           </div>
         </div>
-        <StatusPill stage={project.stage} />
+        <div className="detail-head-actions">
+          <StatusPill stage={project.stage} />
+          <button
+            className="btn danger sm"
+            disabled={del.isPending}
+            onClick={() => {
+              const ok = window.confirm(`Delete "${project.title}"? This removes it from the board.`);
+              if (ok) del.mutate();
+            }}
+          >
+            {del.isPending ? "Deleting..." : "Delete"}
+          </button>
+        </div>
       </div>
 
       <StageProgress stage={project.stage} />
@@ -445,6 +467,16 @@ function SceneCard({ projectId, scene, stage, visualStyle }) {
   const audio = mediaUrl(scene.audio_path, mediaVersion);
   const showClip = clip && scene.scene_type === "video";
   const busy = scene.status === "generating";
+  const contextRefs = scene.context_refs || [];
+  const continuityContext = scene.continuity_context || [];
+  const excludedContextIds = scene.excluded_context_scene_ids || [];
+
+  const setContextExcluded = (sceneId, excluded) => {
+    const next = excluded
+      ? Array.from(new Set([...excludedContextIds, sceneId]))
+      : excludedContextIds.filter((id) => id !== sceneId);
+    save.mutate({ excluded_context_scene_ids: next });
+  };
 
   return (
     <div className={"scene" + (scene.approved ? " approved" : "")}>
@@ -484,6 +516,54 @@ function SceneCard({ projectId, scene, stage, visualStyle }) {
           <div className="scene-style" title={visualStyle}>
             <span>Generation style</span>
             <strong>{visualStyle}</strong>
+          </div>
+        )}
+        {(contextRefs.length > 0 || continuityContext.length > 0) && (
+          <div className="context-refs">
+            <div className="context-refs-head">
+              <span>Continuity context</span>
+              <strong>{contextRefs.filter((ref) => !ref.excluded).length} sent</strong>
+            </div>
+            <div className="context-ref-list">
+              {contextRefs.map((ref) => {
+                const refImg = mediaUrl(ref.image_path, ref.asset_version);
+                return (
+                  <div
+                    key={ref.scene_id}
+                    className={"context-ref" + (ref.excluded ? " excluded" : "")}
+                    title={ref.reason || ref.prompt}
+                  >
+                    <img src={refImg} alt="" />
+                    <div>
+                      <span>Scene {ref.scene_number}</span>
+                      {ref.visual_anchor && <small>{ref.visual_anchor}</small>}
+                      {ref.reason && <small>{ref.reason}</small>}
+                    </div>
+                    <button
+                      type="button"
+                      className="context-ref-toggle"
+                      disabled={save.isPending || busy}
+                      title={ref.excluded ? "Use this context image" : "Exclude this context image"}
+                      onClick={() => setContextExcluded(ref.scene_id, !ref.excluded)}
+                    >
+                      {ref.excluded ? "Undo" : "X"}
+                    </button>
+                  </div>
+                );
+              })}
+              {continuityContext
+                .filter((item) => !contextRefs.some((ref) => ref.scene_number === item.source_scene))
+                .map((item, idx) => (
+                  <div key={`${item.source_scene}-${idx}`} className="context-ref missing">
+                    <div className="context-ref-placeholder">?</div>
+                    <div>
+                      <span>Scene {item.source_scene}</span>
+                      {item.visual_anchor && <small>{item.visual_anchor}</small>}
+                      {item.reason && <small>{item.reason}</small>}
+                    </div>
+                  </div>
+                ))}
+            </div>
           </div>
         )}
         <div className="scene-meta-row">

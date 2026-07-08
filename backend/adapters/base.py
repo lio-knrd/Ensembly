@@ -12,6 +12,7 @@ class GeneratedScene:
     image_prompt: str
     scene_type: str  # "still" | "video"
     characters: list[str] = field(default_factory=list)
+    continuity_context: list[dict] = field(default_factory=list)
 
 
 @dataclass

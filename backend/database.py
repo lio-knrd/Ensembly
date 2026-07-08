@@ -17,6 +17,8 @@ _ADDED_COLUMNS = [
     ("characters", "reference_style_prompt", "TEXT DEFAULT ''"),
     ("characters", "reference_version", "INTEGER DEFAULT 0"),
     ("scenes", "asset_version", "INTEGER DEFAULT 0"),
+    ("scenes", "continuity_context", "JSON DEFAULT '[]'"),
+    ("scenes", "excluded_context_scene_ids", "JSON DEFAULT '[]'"),
     ("projects", "failed_stage", "TEXT DEFAULT NULL"),
     ("projects", "cancel_requested", "BOOLEAN DEFAULT 0"),
     ("projects", "canceled_stage", "TEXT DEFAULT NULL"),

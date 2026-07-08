@@ -29,9 +29,11 @@ class ProjectDetail(BaseModel):
 class SceneUpdate(BaseModel):
     narration_text: Optional[str] = None
     image_prompt: Optional[str] = None
+    continuity_context: Optional[list[dict]] = None
     scene_type: Optional[SceneType] = None
     approved: Optional[bool] = None
     character_ids: Optional[list[str]] = None
+    excluded_context_scene_ids: Optional[list[str]] = None
 
 
 # --- Characters ---
@@ -59,6 +61,12 @@ class ContentPresetIn(BaseModel):
     image_style_prompt: str = ""
     voice_id: str = ""
     is_default: bool = False
+
+
+class StyleSuggestionIn(BaseModel):
+    content_prompt: str = ""
+    current_style_prompt: str = ""
+    guidelines: str = ""
 
 
 # --- Cast / character sheets (pre-storyboard review) ---

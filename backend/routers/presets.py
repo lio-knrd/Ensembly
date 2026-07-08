@@ -8,9 +8,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from ..adapters.llm import ai_image_style_prompt
 from ..database import get_session
 from ..models import ContentPreset, PlatformPreset
-from ..schemas import ContentPresetIn, PlatformPresetIn
+from ..schemas import ContentPresetIn, PlatformPresetIn, StyleSuggestionIn
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
 
@@ -58,6 +59,17 @@ def delete_platform(preset_id: str, session: Session = Depends(get_session)):
 @router.get("/content")
 def list_content(session: Session = Depends(get_session)):
     return [p.model_dump() for p in session.exec(select(ContentPreset).order_by(ContentPreset.name))]
+
+
+@router.post("/content/suggest-style")
+def suggest_content_style(body: StyleSuggestionIn):
+    return {
+        "image_style_prompt": ai_image_style_prompt(
+            body.content_prompt,
+            body.current_style_prompt,
+            body.guidelines,
+        )
+    }
 
 
 @router.post("/content", status_code=201)

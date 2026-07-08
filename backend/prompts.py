@@ -33,12 +33,15 @@ For each scene you must provide:
     styles, or aesthetic labels; the visual style is applied later from the \
     active content preset. If named characters appear, include their exact names \
     and role/action in the image_prompt so downstream image and video models can \
-    match them to their reference images. Only when a later scene genuinely needs \
-    a previously established prop, location, costume detail, symbol, vehicle, \
-    artifact, or environment to stay visually consistent, describe that recurring \
-    element again with the same concrete visual traits. Do not carry over unrelated \
-    earlier scene details, and do not reference other scenes by number; make each \
-    prompt usable on its own.
+    match them to their reference images. Make each prompt usable on its own.
+  - continuity_context: an array of continuity links to earlier scene images. Use \
+    this ONLY when this scene genuinely needs a previously established prop, \
+    location, costume detail, symbol, vehicle, artifact, or environment to stay \
+    visually consistent. Each item must include source_scene (the earlier 1-based \
+    scene number), visual_anchor (the exact recurring visual element), and reason \
+    (why that earlier image should be referenced). If no earlier image is needed, \
+    return an empty array. Do not add links for general mood, theme, color, camera \
+    angle, characters, or broad setting similarity.
   - scene_type: either "still" or "video". Default to "still". Mark a small \
     number of pivotal "hero" moments as "video" when motion would add real impact.
   - characters: a list of named characters that appear in this scene (e.g. \
@@ -83,11 +86,11 @@ def build_script_prompt(
         "scene content, mood, composition, lighting, and framing. Do not include "
         "art style words because image/video style is applied separately from "
         "the content preset. When a scene includes characters, put their exact "
-        "names and clear actions/positions in the image_prompt. Only when later "
-        "scenes genuinely continue earlier props, places, artifacts, costumes, "
-        "or other context-bound objects that must stay visually consistent, "
-        "repeat those elements with the same concrete visual traits. Do not "
-        "carry over unrelated earlier scene details.",
+        "names and clear actions/positions in the image_prompt. For each scene, "
+        "fill continuity_context with explicit earlier source_scene references "
+        "ONLY when an earlier image is truly needed to preserve a specific "
+        "object, place, artifact, costume detail, symbol, vehicle, or environment. "
+        "Use an empty array for ordinary scene-to-scene flow or vague similarity.",
     ]
     return "\n".join(parts)
 
@@ -103,10 +106,23 @@ SCRIPT_JSON_SCHEMA: dict = {
                 "properties": {
                     "narration_text": {"type": "string"},
                     "image_prompt": {"type": "string"},
+                    "continuity_context": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_scene": {"type": "integer"},
+                                "visual_anchor": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["source_scene", "visual_anchor", "reason"],
+                            "additionalProperties": False,
+                        },
+                    },
                     "scene_type": {"type": "string", "enum": ["still", "video"]},
                     "characters": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["narration_text", "image_prompt", "scene_type", "characters"],
+                "required": ["narration_text", "image_prompt", "continuity_context", "scene_type", "characters"],
                 "additionalProperties": False,
             },
         },

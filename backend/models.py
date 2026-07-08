@@ -80,10 +80,12 @@ class Scene(SQLModel, table=True):
     order_index: int = 0
     narration_text: str = ""
     image_prompt: str = ""
+    continuity_context: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     scene_type: SceneType = Field(default=SceneType.STILL)
     character_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     # Names the LLM flagged that don't yet exist in the global library.
     suggested_characters: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    excluded_context_scene_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     audio_path: Optional[str] = None
     timestamps_path: Optional[str] = None
     image_path: Optional[str] = None

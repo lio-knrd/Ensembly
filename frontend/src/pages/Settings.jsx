@@ -200,6 +200,9 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
   const [style, setStyle] = useState(styleField ? preset[styleField] || "" : "");
   const [voiceId, setVoiceId] = useState(styleField ? preset.voice_id || "" : "");
   const [voiceSearch, setVoiceSearch] = useState("");
+  const [styleAssistantOpen, setStyleAssistantOpen] = useState(false);
+  const [styleGuidance, setStyleGuidance] = useState("");
+  const [styleError, setStyleError] = useState("");
   const [isDefault, setIsDefault] = useState(preset.is_default);
   const [saving, setSaving] = useState(false);
   const selectedVoice = voiceOptions.find((voice) => voice.id === voiceId) || null;
@@ -219,6 +222,21 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
     Promise.resolve(onSave(body)).finally(() => setSaving(false));
   };
 
+  const suggestStyle = useMutation({
+    mutationFn: () =>
+      api.suggestContentStyle({
+        content_prompt: prompt,
+        current_style_prompt: style,
+        guidelines: styleGuidance,
+      }),
+    onSuccess: (data) => {
+      setStyle(data.image_style_prompt || "");
+      setStyleError("");
+      setStyleAssistantOpen(false);
+    },
+    onError: (error) => setStyleError(error.message || "Could not generate style."),
+  });
+
   return (
     <div className="preset-item">
       <div className="preset-item-head">
@@ -237,11 +255,46 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
           <label className="preset-field-label">
             Image style (applied to character sheets &amp; scene images — not the script)
           </label>
+          <div className="preset-field-actions">
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={suggestStyle.isPending}
+              onClick={() => setStyleAssistantOpen((open) => !open)}
+              title="Generate a consistent image style prompt from the content prompt"
+            >
+              AI style
+            </button>
+          </div>
           <textarea
             value={style}
             onChange={(e) => setStyle(e.target.value)}
             placeholder="e.g. Cinematic oil-painting, warm dramatic lighting, cohesive palette…"
           />
+          {styleAssistantOpen && (
+            <div className="style-assistant">
+              <label className="preset-field-label">Optional style guidance</label>
+              <textarea
+                value={styleGuidance}
+                onChange={(e) => setStyleGuidance(e.target.value)}
+                placeholder="Mention desired look, medium, level of realism, or character rules to preserve."
+              />
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <span className="style-assistant-note">
+                  Uses the content prompt, current style text, and these notes.
+                </span>
+                <button
+                  type="button"
+                  className="btn sm primary"
+                  disabled={suggestStyle.isPending || (!prompt.trim() && !style.trim() && !styleGuidance.trim())}
+                  onClick={() => suggestStyle.mutate()}
+                >
+                  {suggestStyle.isPending ? "Generating..." : "Generate"}
+                </button>
+              </div>
+              {styleError && <div className="form-error">{styleError}</div>}
+            </div>
+          )}
           <label className="preset-field-label">Voice generation</label>
           <input
             className="voice-search"

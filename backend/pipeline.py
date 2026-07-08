@@ -7,7 +7,6 @@ be re-run for a single scene or the whole project without restarting from IDEA.
 from __future__ import annotations
 
 import json
-import re
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -43,50 +42,7 @@ from .storage import project_folder
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs_by_project: dict[str, set[Future]] = {}
 _jobs_lock = Lock()
-
-_CONTINUITY_STOPWORDS = {
-    "about",
-    "above",
-    "action",
-    "across",
-    "after",
-    "again",
-    "against",
-    "background",
-    "behind",
-    "camera",
-    "close",
-    "composition",
-    "dramatic",
-    "during",
-    "environment",
-    "faces",
-    "framing",
-    "front",
-    "glowing",
-    "high",
-    "image",
-    "light",
-    "lighting",
-    "medium",
-    "moment",
-    "mood",
-    "people",
-    "person",
-    "scene",
-    "short",
-    "showing",
-    "stands",
-    "story",
-    "style",
-    "subject",
-    "through",
-    "view",
-    "visual",
-    "while",
-    "with",
-}
-
+_MAX_VIDEO_PROMPT_CHARS = 2400
 
 def submit(fn, *args) -> None:
     """Enqueue a pipeline step to run off the request thread."""
@@ -313,6 +269,7 @@ def generate_script(project_id: str) -> None:
                     order_index=idx,
                     narration_text=s.narration_text,
                     image_prompt=s.image_prompt,
+                    continuity_context=s.continuity_context,
                     scene_type=SceneType(s.scene_type),
                     character_ids=matched,
                     suggested_characters=suggested,
@@ -851,10 +808,33 @@ def _scene_character_refs(session, scene: Scene) -> list[dict]:
     return refs
 
 
-def _scene_continuity_refs(session, project: Project, scene: Scene, limit: int = 3) -> list[dict]:
-    """Relevant earlier scene images for recurring props, locations, or environments."""
+def _scene_continuity_refs(session, project: Project, scene: Scene, limit: int = 10) -> list[dict]:
+    """Active earlier scene refs explicitly requested by the script output."""
+    excluded = set(scene.excluded_context_scene_ids or [])
+    candidates = [ref for ref in _scene_continuity_candidates(session, project, scene) if ref["scene_id"] not in excluded]
+    selected = candidates[:limit]
+    return sorted(selected, key=lambda ref: ref["order_index"])
+
+
+def scene_context_refs(session, project: Project, scene: Scene, limit: int = 10) -> list[dict]:
+    """Continuity refs surfaced to the UI, including explicitly excluded matches."""
+    excluded = set(scene.excluded_context_scene_ids or [])
+    candidates = _scene_continuity_candidates(session, project, scene)
+    active = [ref for ref in candidates if ref["scene_id"] not in excluded][:limit]
+    active_ids = {ref["scene_id"] for ref in active}
+    visible = active + [ref for ref in candidates if ref["scene_id"] in excluded and ref["scene_id"] not in active_ids]
+    return sorted(
+        [{**ref, "excluded": ref["scene_id"] in excluded} for ref in visible],
+        key=lambda ref: (ref["excluded"], ref["order_index"]),
+    )
+
+
+def _scene_continuity_candidates(session, project: Project, scene: Scene) -> list[dict]:
+    """Earlier scene image candidates explicitly named in continuity_context."""
     root = Path(settings.projects_dir.parent.parent)
-    previous = session.exec(
+    if not scene.continuity_context:
+        return []
+    previous_scenes = session.exec(
         select(Scene)
         .where(
             Scene.project_id == project.id,
@@ -863,52 +843,37 @@ def _scene_continuity_refs(session, project: Project, scene: Scene, limit: int =
         )
         .order_by(Scene.order_index)
     ).all()
+    by_scene_number = {prev.order_index + 1: prev for prev in previous_scenes}
 
-    current_terms = _continuity_terms(scene.image_prompt)
-    current_phrases = _continuity_phrases(scene.image_prompt)
-    candidates: list[tuple[int, int, dict]] = []
-    for prev in previous:
+    candidates: list[tuple[int, dict]] = []
+    seen_scene_ids: set[str] = set()
+    for item in scene.continuity_context:
+        try:
+            source_scene = int(item.get("source_scene", 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        prev = by_scene_number.get(source_scene)
+        if not prev or prev.id in seen_scene_ids:
+            continue
         path = root / prev.image_path
         if not path.exists():
             continue
-        prev_terms = _continuity_terms(prev.image_prompt)
-        prev_phrases = _continuity_phrases(prev.image_prompt)
-        shared_terms = current_terms & prev_terms
-        shared_phrases = current_phrases & prev_phrases
-        score = len(shared_terms) + (3 * len(shared_phrases))
-
-        # Keep this intentionally narrow: a single generic repeated word is not
-        # enough to attach a whole previous scene as visual context.
-        if not shared_phrases and len(shared_terms) < 3:
-            continue
-
-        candidates.append((score, prev.order_index, {
+        anchor = str(item.get("visual_anchor", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        seen_scene_ids.add(prev.id)
+        candidates.append((prev.order_index, {
+            "scene_id": prev.id,
             "scene_number": prev.order_index + 1,
+            "order_index": prev.order_index,
+            "image_path": prev.image_path,
+            "asset_version": prev.asset_version or 0,
             "prompt": prev.image_prompt,
             "path": path,
-            "matches": sorted(shared_phrases) or sorted(shared_terms),
+            "visual_anchor": anchor,
+            "reason": reason,
+            "matches": [anchor] if anchor else [],
         }))
-    selected = sorted(candidates, key=lambda item: (-item[0], -item[1]))[:limit]
-    return [ref for _, _, ref in sorted(selected, key=lambda item: item[1])]
-
-
-def _continuity_terms(text: str) -> set[str]:
-    words = re.findall(r"[a-zA-Z][a-zA-Z'-]{3,}", text.lower())
-    return {
-        word.strip("'-")
-        for word in words
-        if word.strip("'-") and word.strip("'-") not in _CONTINUITY_STOPWORDS
-    }
-
-
-def _continuity_phrases(text: str) -> set[str]:
-    words = [word for word in re.findall(r"[a-zA-Z][a-zA-Z'-]{3,}", text.lower())]
-    terms = [word.strip("'-") for word in words if word.strip("'-") not in _CONTINUITY_STOPWORDS]
-    phrases: set[str] = set()
-    for size in (2, 3):
-        for idx in range(0, max(0, len(terms) - size + 1)):
-            phrases.add(" ".join(terms[idx:idx + size]))
-    return phrases
+    return [ref for _, ref in sorted(candidates, key=lambda item: item[0])]
 
 
 def _apply_character_context(prompt: str, character_refs: list[dict], label: str) -> str:
@@ -939,11 +904,13 @@ def _apply_continuity_context(
     lines = []
     for offset, ref in enumerate(continuity_refs, start=1):
         attached_index = start_index + offset
-        matches = ", ".join(ref.get("matches", [])[:5])
-        match_note = f" matching: {matches} -" if matches else ""
+        anchor = ref.get("visual_anchor") or ", ".join(ref.get("matches", [])[:5])
+        reason = ref.get("reason", "")
+        anchor_note = f" anchor: {anchor} -" if anchor else ""
+        reason_note = f" Reason: {reason}" if reason else ""
         lines.append(
-            f"{attached_index}. Scene {ref['scene_number']} continuity reference -{match_note} "
-            f"{ref['prompt']}"
+            f"{attached_index}. Scene {ref['scene_number']} continuity reference -{anchor_note} "
+            f"{ref['prompt']}{reason_note}"
         )
     mapping = "\n".join(lines)
     return (
@@ -958,12 +925,23 @@ def _apply_continuity_context(
     )
 
 
+def _build_clip_prompt(scene_prompt: str, element_refs: list[dict]) -> str:
+    prompt = (
+        "Animate the provided start image. Preserve the exact rendered style, "
+        "character appearances, props, environment, composition, and lighting from "
+        "the image; do not redesign the scene. Motion direction: "
+        f"{scene_prompt.strip()}"
+    )
+    return _limit_prompt(_apply_kling_element_context(prompt, element_refs), _MAX_VIDEO_PROMPT_CHARS)
+
+
 def _apply_kling_element_context(prompt: str, element_refs: list[dict]) -> str:
     if not element_refs:
         return prompt
     lines = []
     for idx, ref in enumerate(element_refs, start=1):
-        desc = f" - {ref['description']}" if ref.get("description") else ""
+        desc = _short_text(ref.get("description", ""), 90)
+        desc = f" - {desc}" if desc else ""
         lines.append(f"@Element{idx} = {ref['name']}{desc}")
     mapping = "\n".join(lines)
     return (
@@ -973,6 +951,16 @@ def _apply_kling_element_context(prompt: str, element_refs: list[dict]) -> str:
         f"When describing these characters, reference the exact @Element handles above. "
         f"Keep each @Element identity consistent and do not swap them."
     )
+
+
+def _short_text(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
+
+
+def _limit_prompt(prompt: str, limit: int) -> str:
+    prompt = prompt.strip()
+    return prompt if len(prompt) <= limit else prompt[: limit - 3].rstrip() + "..."
 
 
 # --------------------------------------------------------------------------- #
@@ -1040,10 +1028,7 @@ def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> b
     character_refs = _scene_character_refs(session, scene)
     element_limit = getattr(vid, "_MAX_ELEMENTS", len(character_refs))
     element_refs = character_refs[:element_limit]
-    prompt = _apply_kling_element_context(
-        _apply_style(scene.image_prompt, _content_style(session, project)),
-        element_refs,
-    )
+    prompt = _build_clip_prompt(scene.image_prompt, element_refs)
     result = vid.generate(
         image_abs,
         prompt,

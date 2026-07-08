@@ -1,11 +1,15 @@
 """Project + scene endpoints and pipeline controls."""
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from ..adapters.registry import tts_voice_label
 from .. import pipeline
+from ..config import settings
 from ..database import get_session
 from ..models import Character, ContentPreset, Project, ProjectCharacter, Scene, SceneType, Stage
 from ..schemas import CastSheetGenerate, ProjectCreate, ProjectDetail, SceneUpdate
@@ -79,7 +83,7 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
             project_data["voice_name"] = tts_voice_label(content.voice_id)
     return ProjectDetail(
         project=project_data,
-        scenes=[s.model_dump() for s in scenes],
+        scenes=[_scene_payload(session, project, s) for s in scenes],
         metadata=project_metadata(project.folder_path),
         characters=characters,
     )
@@ -90,12 +94,28 @@ def delete_project(project_id: str, session: Session = Depends(get_session)):
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    folder_path = project.folder_path
+    pipeline.cancel_project(project_id)
     for s in session.exec(select(Scene).where(Scene.project_id == project_id)):
         session.delete(s)
     for link in session.exec(select(ProjectCharacter).where(ProjectCharacter.project_id == project_id)):
         session.delete(link)
     session.delete(project)
     session.commit()
+    _delete_project_folder(folder_path)
+
+
+def _delete_project_folder(folder_path: str | None) -> None:
+    if not folder_path:
+        return
+    folder = (Path(settings.projects_dir.parent.parent) / folder_path).resolve()
+    projects_root = settings.projects_dir.resolve()
+    try:
+        folder.relative_to(projects_root)
+    except ValueError:
+        return
+    if folder.exists() and folder.is_dir():
+        shutil.rmtree(folder)
 
 
 # --- Pipeline controls ---
@@ -208,7 +228,8 @@ def update_scene(project_id: str, scene_id: str, body: SceneUpdate, session: Ses
         setattr(scene, field, value)
     session.add(scene)
     session.commit()
-    return scene.model_dump()
+    project = session.get(Project, project_id)
+    return _scene_payload(session, project, scene) if project else scene.model_dump()
 
 
 @router.post("/{project_id}/scenes/{scene_id}/regenerate-image")
@@ -246,3 +267,22 @@ def _require_scene(session: Session, project_id: str, scene_id: str) -> Scene:
     if not scene or scene.project_id != project_id:
         raise HTTPException(404, "Scene not found")
     return scene
+
+
+def _scene_payload(session: Session, project: Project, scene: Scene) -> dict:
+    data = scene.model_dump()
+    refs = []
+    for ref in pipeline.scene_context_refs(session, project, scene):
+        refs.append({
+            "scene_id": ref["scene_id"],
+            "scene_number": ref["scene_number"],
+            "image_path": ref["image_path"],
+            "asset_version": ref["asset_version"],
+            "prompt": ref["prompt"],
+            "matches": ref["matches"],
+            "visual_anchor": ref["visual_anchor"],
+            "reason": ref["reason"],
+            "excluded": ref["excluded"],
+        })
+    data["context_refs"] = refs
+    return data

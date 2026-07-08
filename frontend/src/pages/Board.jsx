@@ -59,7 +59,19 @@ export default function Board() {
 
 function ProjectCard({ project }) {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const thumb = mediaUrl(project.thumbnail, project.thumbnail_version);
+  const del = useMutation({
+    mutationFn: () => api.deleteProject(project.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+  });
+
+  const deleteProject = (event) => {
+    event.stopPropagation();
+    const ok = window.confirm(`Delete "${project.title}"? This removes it from the board.`);
+    if (ok) del.mutate();
+  };
+
   return (
     <div className="card" onClick={() => navigate(`/project/${project.id}`)}>
       <div
@@ -73,6 +85,15 @@ function ProjectCard({ project }) {
         <div className="card-meta">
           <StatusPill stage={project.stage} />
           <span className="card-duration">{project.target_duration_seconds}s</span>
+        </div>
+        <div className="card-actions">
+          <button
+            className="btn danger sm"
+            disabled={del.isPending}
+            onClick={deleteProject}
+          >
+            {del.isPending ? "Deleting..." : "Delete"}
+          </button>
         </div>
       </div>
     </div>

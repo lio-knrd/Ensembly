@@ -39,12 +39,29 @@ def _coerce_script(data: dict) -> GeneratedScript:
         st = str(raw.get("scene_type", "still")).lower()
         if st not in ("still", "video"):
             st = "still"
+        continuity_context = []
+        for item in raw.get("continuity_context", []) or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                source_scene = int(item.get("source_scene", 0))
+            except (TypeError, ValueError):
+                source_scene = 0
+            visual_anchor = str(item.get("visual_anchor", "")).strip()
+            reason = str(item.get("reason", "")).strip()
+            if source_scene > 0 and visual_anchor:
+                continuity_context.append({
+                    "source_scene": source_scene,
+                    "visual_anchor": visual_anchor,
+                    "reason": reason,
+                })
         scenes.append(
             GeneratedScene(
                 narration_text=str(raw.get("narration_text", "")).strip(),
                 image_prompt=str(raw.get("image_prompt", "")).strip(),
                 scene_type=st,
                 characters=[str(c).strip() for c in raw.get("characters", []) if str(c).strip()],
+                continuity_context=continuity_context,
             )
         )
     return GeneratedScript(scenes=scenes, metadata=data.get("metadata", {}))
@@ -134,6 +151,7 @@ class OfflineScriptGenerator(ScriptGenerator):
                     # Spread the guessed cast across scenes so the character-sheet
                     # review step is exercised offline too.
                     characters=cast[: (1 if i % 2 == 0 else len(cast))] if cast else [],
+                    continuity_context=[],
                 )
             )
         metadata = {
@@ -200,3 +218,80 @@ def ai_character_description(name: str, topic: str, content_prompt: str) -> str:
     except Exception:  # noqa: BLE001 — description is best-effort
         pass
     return f"{name}, a central figure in the story of {topic}."
+
+
+def ai_image_style_prompt(content_prompt: str, current_style_prompt: str = "", guidelines: str = "") -> str:
+    """Generate a reusable image style directive for character-consistent visuals."""
+    instruction = (
+        "Write a concise image style prompt for an AI video/image pipeline. "
+        "It will be appended to every character sheet and every scene image prompt. "
+        "Base it on the story/content context and the user's optional guidance. "
+        "The prompt must protect character consistency: define one coherent visual "
+        "language, one consistent character embodiment taxonomy, and rules that keep "
+        "each character's species/body plan, age category, silhouette, clothing logic, "
+        "palette, facial structure, and proportions stable across scenes. "
+        "If animals, creatures, robots, humans, or stylized beings appear, prevent "
+        "mixed interpretations such as some characters becoming humanoid while others "
+        "remain naturalistic unless the user explicitly asks for that contrast. "
+        "Do not invent plot events. Do not include camera directions, scene-specific "
+        "actions, or character names. Return only the finished style prompt, no preamble.\n\n"
+        f"Content prompt:\n{content_prompt[:2000] or '(empty)'}\n\n"
+        f"Existing style prompt to improve or replace:\n{current_style_prompt[:1200] or '(empty)'}\n\n"
+        f"Additional user guidance:\n{guidelines[:1200] or '(none)'}"
+    )
+    try:
+        if settings.anthropic_api_key and settings.default_llm_provider != "openai":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            resp = client.messages.create(
+                model=settings.anthropic_script_model,
+                max_tokens=450,
+                messages=[{"role": "user", "content": instruction}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+            if text:
+                return _clean_style_prompt(text)
+        if settings.openai_api_key:
+            resp = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.openai_script_model,
+                    "messages": [{"role": "user", "content": instruction}],
+                    "max_tokens": 450,
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+            if text:
+                return _clean_style_prompt(text)
+    except Exception:  # noqa: BLE001 - style suggestions are best-effort
+        pass
+    return _offline_style_prompt(content_prompt, current_style_prompt, guidelines)
+
+
+def _clean_style_prompt(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    text = re.sub(r"^(style prompt|image style prompt)\s*:\s*", "", text, flags=re.I).strip()
+    return textwrap.shorten(text, width=1400, placeholder="...")
+
+
+def _offline_style_prompt(content_prompt: str, current_style_prompt: str, guidelines: str) -> str:
+    base = current_style_prompt.strip() or guidelines.strip()
+    if not base:
+        base = "Cohesive cinematic illustration with clear silhouettes, expressive lighting, balanced detail, and a unified color palette."
+    context_note = ""
+    if content_prompt.strip():
+        context_note = " Match the subject matter and tone of the content prompt without adding scene-specific actions."
+    consistency = (
+        " Character consistency is mandatory: keep every recurring character's species or archetype, body plan, proportions, "
+        "age category, facial structure, silhouette, clothing logic, and core palette stable across character sheets and scenes. "
+        "Use one consistent embodiment taxonomy for all comparable characters; do not mix naturalistic, humanoid, cartoon, "
+        "mechanical, or creature interpretations unless the prompt explicitly requests that contrast."
+    )
+    return textwrap.shorten(f"{base}{context_note}{consistency}", width=1400, placeholder="...")

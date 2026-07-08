@@ -92,6 +92,8 @@ export const api = {
   deletePlatformPreset: (id) =>
     req(`/api/presets/platform/${id}`, { method: "DELETE" }),
   listContentPresets: () => req("/api/presets/content"),
+  suggestContentStyle: (body) =>
+    req("/api/presets/content/suggest-style", { method: "POST", body: JSON.stringify(body) }),
   createContentPreset: (body) =>
     req("/api/presets/content", { method: "POST", body: JSON.stringify(body) }),
   updateContentPreset: (id, body) =>
