@@ -57,6 +57,7 @@ class ContentPresetIn(BaseModel):
     name: str
     content_prompt: str = ""
     image_style_prompt: str = ""
+    voice_id: str = ""
     is_default: bool = False
 
 

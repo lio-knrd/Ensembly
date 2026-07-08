@@ -11,7 +11,6 @@ export default function Board() {
   const { data: projects = [], isLoading } = useQuery({
     queryKey: ["projects"],
     queryFn: api.listProjects,
-    refetchInterval: 4000,
   });
 
   const byColumn = Object.fromEntries(COLUMNS.map((c) => [c.key, []]));
@@ -60,7 +59,7 @@ export default function Board() {
 
 function ProjectCard({ project }) {
   const navigate = useNavigate();
-  const thumb = mediaUrl(project.thumbnail);
+  const thumb = mediaUrl(project.thumbnail, project.thumbnail_version);
   return (
     <div className="card" onClick={() => navigate(`/project/${project.id}`)}>
       <div

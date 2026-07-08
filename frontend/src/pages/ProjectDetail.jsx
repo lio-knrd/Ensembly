@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
@@ -10,8 +10,6 @@ export default function ProjectDetail() {
   const { data, isLoading } = useQuery({
     queryKey: ["project", id],
     queryFn: () => api.getProject(id),
-    refetchInterval: (q) =>
-      q.state.data && isGenerating(q.state.data.project.stage) ? 1500 : 6000,
   });
 
   if (isLoading || !data) return <div className="empty">Loading…</div>;
@@ -38,6 +36,7 @@ export default function ProjectDetail() {
             {characters.length > 0 && (
               <span className="tag">{characters.length} characters</span>
             )}
+            {project.voice_name && <span className="tag">Voice: {project.voice_name}</span>}
           </div>
         </div>
         <StatusPill stage={project.stage} />
@@ -226,7 +225,6 @@ function CastPanel({ project, visualStyle }) {
   const { data: cast = [] } = useQuery({
     queryKey: ["cast", id],
     queryFn: () => api.getCast(id),
-    refetchInterval: 2000,
   });
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["cast", id] });
@@ -310,7 +308,7 @@ function CastCard({ projectId, member, onDone, busy }) {
       }),
     onSuccess: onDone,
   });
-  const thumb = mediaUrl(member.reference_image_path);
+  const thumb = mediaUrl(member.reference_image_path, member.reference_version);
 
   return (
     <div className={"cast-card" + (member.has_sheet ? "" : " missing")}>
@@ -416,6 +414,14 @@ function SceneCard({ projectId, scene, stage, visualStyle }) {
   const [narration, setNarration] = useState(scene.narration_text);
   const [prompt, setPrompt] = useState(scene.image_prompt);
 
+  useEffect(() => {
+    setNarration(scene.narration_text);
+  }, [scene.id, scene.narration_text]);
+
+  useEffect(() => {
+    setPrompt(scene.image_prompt);
+  }, [scene.id, scene.image_prompt]);
+
   const save = useMutation({
     mutationFn: (body) => api.updateScene(projectId, scene.id, body),
     onSuccess: invalidate,
@@ -433,9 +439,10 @@ function SceneCard({ projectId, scene, stage, visualStyle }) {
     onSuccess: invalidate,
   });
 
-  const img = mediaUrl(scene.image_path);
-  const clip = mediaUrl(scene.clip_path);
-  const audio = mediaUrl(scene.audio_path);
+  const mediaVersion = scene.asset_version || 0;
+  const img = mediaUrl(scene.image_path, mediaVersion);
+  const clip = mediaUrl(scene.clip_path, mediaVersion);
+  const audio = mediaUrl(scene.audio_path, mediaVersion);
   const showClip = clip && scene.scene_type === "video";
   const busy = scene.status === "generating";
 
@@ -543,7 +550,7 @@ function Waveform({ src }) {
           <span key={i} style={{ height: `${h}px` }} />
         ))}
       </div>
-      <audio src={src} controls preload="none" />
+      <audio key={src} src={src} controls preload="metadata" />
     </div>
   );
 }

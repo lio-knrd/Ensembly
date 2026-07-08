@@ -147,6 +147,11 @@ function PresetSection({ kind }) {
   const remove = isPlatform ? api.deletePlatformPreset : api.deleteContentPreset;
 
   const { data: presets = [] } = useQuery({ queryKey: [key], queryFn: list });
+  const { data: voices = [] } = useQuery({
+    queryKey: ["voices"],
+    queryFn: api.listVoices,
+    enabled: !isPlatform,
+  });
   const invalidate = () => qc.invalidateQueries({ queryKey: [key] });
   const [adding, setAdding] = useState(false);
 
@@ -168,6 +173,7 @@ function PresetSection({ kind }) {
           preset={p}
           promptField={promptField}
           styleField={styleField}
+          voiceOptions={voices}
           onSave={(body) => update(p.id, body).then(invalidate)}
           onDelete={() => remove(p.id).then(invalidate)}
         />
@@ -177,6 +183,7 @@ function PresetSection({ kind }) {
         <PresetEditor
           promptField={promptField}
           styleField={styleField}
+          voiceOptions={voices}
           preset={{ name: "", [promptField]: "", is_default: false }}
           isNew
           onSave={(body) => create(body).then(() => { setAdding(false); invalidate(); })}
@@ -187,17 +194,28 @@ function PresetSection({ kind }) {
   );
 }
 
-function PresetEditor({ preset, promptField, styleField, isNew, onSave, onDelete, onCancel }) {
+function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNew, onSave, onDelete, onCancel }) {
   const [name, setName] = useState(preset.name);
   const [prompt, setPrompt] = useState(preset[promptField] || "");
   const [style, setStyle] = useState(styleField ? preset[styleField] || "" : "");
+  const [voiceId, setVoiceId] = useState(styleField ? preset.voice_id || "" : "");
+  const [voiceSearch, setVoiceSearch] = useState("");
   const [isDefault, setIsDefault] = useState(preset.is_default);
   const [saving, setSaving] = useState(false);
+  const selectedVoice = voiceOptions.find((voice) => voice.id === voiceId) || null;
+  const filteredVoices = voiceOptions.filter((voice) => {
+    const haystack = [voice.label, voice.description, voice.source, ...Object.values(voice.labels || {})]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(voiceSearch.trim().toLowerCase());
+  });
 
   const save = () => {
     setSaving(true);
     const body = { name, [promptField]: prompt, is_default: isDefault };
     if (styleField) body[styleField] = style;
+    if (styleField) body.voice_id = voiceId;
     Promise.resolve(onSave(body)).finally(() => setSaving(false));
   };
 
@@ -224,6 +242,38 @@ function PresetEditor({ preset, promptField, styleField, isNew, onSave, onDelete
             onChange={(e) => setStyle(e.target.value)}
             placeholder="e.g. Cinematic oil-painting, warm dramatic lighting, cohesive palette…"
           />
+          <label className="preset-field-label">Voice generation</label>
+          <input
+            className="voice-search"
+            value={voiceSearch}
+            placeholder={`Search ${voiceOptions.length} ElevenLabs voices`}
+            onChange={(e) => setVoiceSearch(e.target.value)}
+          />
+          <div className="voice-field">
+            <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)}>
+              <option value="">Configured default</option>
+              {filteredVoices.map((voice) => (
+                <option key={voice.id} value={voice.id}>
+                  {voice.label}{voice.source ? ` (${voice.source})` : ""}
+                </option>
+              ))}
+            </select>
+            {selectedVoice?.preview_url ? (
+              <audio
+                key={selectedVoice.id}
+                src={selectedVoice.preview_url}
+                controls
+                preload="none"
+              />
+            ) : (
+              <span className="voice-empty-preview">
+                {voiceId ? "No preview provided" : "Select a voice to preview"}
+              </span>
+            )}
+          </div>
+          {selectedVoice?.description && (
+            <div className="voice-note">{selectedVoice.description}</div>
+          )}
         </>
       )}
       <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>

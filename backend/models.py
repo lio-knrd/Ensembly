@@ -89,6 +89,7 @@ class Scene(SQLModel, table=True):
     image_path: Optional[str] = None
     clip_path: Optional[str] = None
     duration_seconds: Optional[float] = None
+    asset_version: int = 0
     approved: bool = False
     # Per-scene generation status, so the UI can show a spinner on one card.
     status: str = "pending"  # pending | generating | ready | failed
@@ -103,6 +104,7 @@ class Character(SQLModel, table=True):
     reference_image_path: Optional[str] = None
     reference_prompt: str = ""
     reference_style_prompt: str = ""
+    reference_version: int = 0
     variant_paths: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 
@@ -133,6 +135,7 @@ class ContentPreset(SQLModel, table=True):
     # (character reference sheets + scene images). NOT sent to the script LLM,
     # so scene image_prompts stay clean and the look stays consistent.
     image_style_prompt: str = ""
+    voice_id: str = ""
     is_default: bool = False
 
 

@@ -60,7 +60,7 @@ function CharacterCard({ character }) {
     onSuccess: invalidate,
   });
 
-  const img = mediaUrl(character.reference_image_path);
+  const img = mediaUrl(character.reference_image_path, character.reference_version);
   const hasSheet = Boolean(character.reference_image_path);
   const hasDescription = Boolean(character.description?.trim());
   const styleText = character.reference_style_prompt?.trim();

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
+from .config import settings
 from .database import engine
 from .models import ContentPreset, PlatformPreset, Setting
 
@@ -41,6 +42,7 @@ DEFAULT_CONTENT = ContentPreset(
         "brushwork, epic mythological atmosphere, rich but muted color palette, "
         "consistent across all scenes. Vertical 9:16 composition."
     ),
+    voice_id=settings.elevenlabs_voice_id,
 )
 
 DEFAULT_SETTINGS: dict[str, object] = {

@@ -10,6 +10,7 @@ from sqlmodel import Session, func, select
 from ..adapters import get_image_generator
 from ..config import settings
 from ..database import get_session
+from ..events import bus
 from ..models import Character, ProjectCharacter, Scene
 from ..schemas import CharacterCreate, CharacterUpdate
 from ..storage import character_folder
@@ -31,6 +32,16 @@ def _usage_count(session: Session, character_id: str) -> int:
 
 def _serialize(session: Session, char: Character) -> dict:
     return {**char.model_dump(), "used_in_projects": _usage_count(session, char.id)}
+
+
+def _project_ids(session: Session, character_id: str) -> list[str]:
+    return session.exec(
+        select(ProjectCharacter.project_id).where(ProjectCharacter.character_id == character_id)
+    ).all()
+
+
+def _publish_character(session: Session, char: Character) -> None:
+    bus.publish("character.updated", character_id=char.id, project_ids=_project_ids(session, char.id))
 
 
 @router.get("")
@@ -57,12 +68,14 @@ def create_character(body: CharacterCreate, session: Session = Depends(get_sessi
             char.reference_image_path = _rel(out)
             char.reference_prompt = prompt
             char.reference_style_prompt = ""
+            char.reference_version = (char.reference_version or 0) + 1
             session.add(char)
             session.commit()
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Reference image generation failed: {exc}")
 
     _write_metadata(folder, char)
+    _publish_character(session, char)
     return _serialize(session, char)
 
 
@@ -76,6 +89,7 @@ def update_character(character_id: str, body: CharacterUpdate, session: Session 
     session.add(char)
     session.commit()
     _write_metadata(character_folder(char.name), char)
+    _publish_character(session, char)
     return _serialize(session, char)
 
 
@@ -84,6 +98,7 @@ def delete_character(character_id: str, session: Session = Depends(get_session))
     char = session.get(Character, character_id)
     if not char:
         raise HTTPException(404, "Character not found")
+    project_ids = _project_ids(session, character_id)
     for scene in session.exec(select(Scene)):
         if character_id not in scene.character_ids:
             continue
@@ -97,6 +112,7 @@ def delete_character(character_id: str, session: Session = Depends(get_session))
         session.delete(link)
     session.delete(char)
     session.commit()
+    bus.publish("character.deleted", character_id=character_id, project_ids=project_ids)
 
 
 @router.post("/{character_id}/reference")
@@ -113,9 +129,11 @@ async def upload_reference(
     char.reference_image_path = _rel(dest)
     char.reference_prompt = ""
     char.reference_style_prompt = ""
+    char.reference_version = (char.reference_version or 0) + 1
     session.add(char)
     session.commit()
     _write_metadata(folder, char)
+    _publish_character(session, char)
     return _serialize(session, char)
 
 
@@ -136,9 +154,11 @@ def regenerate_reference(character_id: str, session: Session = Depends(get_sessi
     char.reference_image_path = _rel(out)
     char.reference_prompt = prompt
     char.reference_style_prompt = ""
+    char.reference_version = (char.reference_version or 0) + 1
     session.add(char)
     session.commit()
     _write_metadata(folder, char)
+    _publish_character(session, char)
     return _serialize(session, char)
 
 

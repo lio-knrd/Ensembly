@@ -154,6 +154,14 @@ def _content_style(session: Session, project: Project) -> str:
     return (preset.image_style_prompt if preset else "") or ""
 
 
+def _content_voice_id(session: Session, project: Project) -> str | None:
+    """The TTS voice from the project's content preset, falling back to config."""
+    if not project.content_preset_id:
+        return None
+    preset = session.get(ContentPreset, project.content_preset_id)
+    return (preset.voice_id if preset else "") or None
+
+
 def _apply_style(prompt: str, style: str) -> str:
     style = style.strip()
     return (
@@ -516,6 +524,7 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
                 "description": char.description,
                 "has_sheet": has_sheet,
                 "reference_image_path": char.reference_image_path,
+                "reference_version": char.reference_version,
                 "reference_prompt": char.reference_prompt,
                 "reference_style_prompt": char.reference_style_prompt,
             })
@@ -531,6 +540,7 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
                 "description": "",
                 "has_sheet": False,
                 "reference_image_path": None,
+                "reference_version": 0,
                 "reference_prompt": "",
                 "reference_style_prompt": "",
             })
@@ -594,6 +604,7 @@ def generate_character_sheet(
             char.reference_image_path = _rel(out)
             char.reference_prompt = ref_prompt
             char.reference_style_prompt = style
+            char.reference_version = (char.reference_version or 0) + 1
             session.add(char)
             session.commit()
         except Exception as exc:  # noqa: BLE001
@@ -625,6 +636,7 @@ def generate_character_sheet(
             if missing
             else "All character sheets ready",
         )
+        bus.publish("character.updated", character_id=char.id, project_ids=[project.id])
         bus.publish("cast.updated", project_id=project.id)
 
 
@@ -674,10 +686,13 @@ def generate_audio(project_id: str) -> None:
             select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
         ).all()
         try:
-            tts = get_tts_generator()
+            tts = get_tts_generator(_content_voice_id(session, project))
             for scene in scenes:
                 if _stop_if_canceled(session, project):
                     return
+                scene.status = "generating"
+                session.add(scene)
+                session.commit()
                 bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="audio")
                 audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
                 ts_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.timestamps.json"
@@ -687,6 +702,8 @@ def generate_audio(project_id: str) -> None:
                 scene.audio_path = _rel(audio_out)
                 scene.timestamps_path = _rel(ts_out)
                 scene.duration_seconds = result.duration_seconds
+                scene.asset_version = (scene.asset_version or 0) + 1
+                scene.status = "ready"
                 session.add(scene)
                 session.commit()
                 bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
@@ -756,6 +773,7 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
         return False
     scene.image_path = _rel(result)
     scene.status = "ready"
+    scene.asset_version = (scene.asset_version or 0) + 1
     session.add(scene)
     session.commit()
     bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
@@ -873,6 +891,9 @@ def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> b
     if _stop_if_canceled(session, project):
         return False
     bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="clip")
+    scene.status = "generating"
+    session.add(scene)
+    session.commit()
     image_abs = Path(settings.projects_dir.parent.parent) / scene.image_path
     out = folder / "clips" / f"scene_{scene.order_index + 1:02d}.mp4"
     duration = scene.duration_seconds or 3.0
@@ -894,6 +915,8 @@ def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> b
     if _stop_if_canceled(session, project):
         return False
     scene.clip_path = _rel(result)
+    scene.asset_version = (scene.asset_version or 0) + 1
+    scene.status = "ready"
     session.add(scene)
     session.commit()
     bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
@@ -991,7 +1014,11 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
         try:
             if _stop_if_canceled(session, project):
                 return
-            tts = get_tts_generator()
+            bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="audio")
+            scene.status = "generating"
+            session.add(scene)
+            session.commit()
+            tts = get_tts_generator(_content_voice_id(session, project))
             audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
             ts_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.timestamps.json"
             result = tts.synthesize(scene.narration_text, audio_out, ts_out)
@@ -1000,6 +1027,8 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
             scene.audio_path = _rel(audio_out)
             scene.timestamps_path = _rel(ts_out)
             scene.duration_seconds = result.duration_seconds
+            scene.asset_version = (scene.asset_version or 0) + 1
+            scene.status = "ready"
             session.add(scene)
             session.commit()
             ordered = session.exec(

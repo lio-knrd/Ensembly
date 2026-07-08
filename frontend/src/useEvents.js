@@ -11,6 +11,25 @@ export function useEvents() {
     let ws;
     let closed = false;
     let retry;
+    let flushTimer;
+    let refreshProjects = false;
+    let refreshCharacters = false;
+    const projectIds = new Set();
+
+    const scheduleFlush = () => {
+      clearTimeout(flushTimer);
+      flushTimer = setTimeout(() => {
+        if (refreshProjects) qc.invalidateQueries({ queryKey: ["projects"] });
+        if (refreshCharacters) qc.invalidateQueries({ queryKey: ["characters"] });
+        for (const projectId of projectIds) {
+          qc.invalidateQueries({ queryKey: ["project", projectId] });
+          qc.invalidateQueries({ queryKey: ["cast", projectId] });
+        }
+        refreshProjects = false;
+        refreshCharacters = false;
+        projectIds.clear();
+      }, 150);
+    };
 
     const connect = () => {
       ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -21,12 +40,13 @@ export function useEvents() {
         } catch {
           return;
         }
-        // Any pipeline event affects the board and (if present) the project.
-        qc.invalidateQueries({ queryKey: ["projects"] });
+        refreshProjects = true;
+        if (msg.type?.startsWith("character.")) refreshCharacters = true;
         if (msg.project_id) {
-          qc.invalidateQueries({ queryKey: ["project", msg.project_id] });
-          qc.invalidateQueries({ queryKey: ["cast", msg.project_id] });
+          projectIds.add(msg.project_id);
         }
+        for (const projectId of msg.project_ids || []) projectIds.add(projectId);
+        scheduleFlush();
       };
       ws.onclose = () => {
         if (!closed) retry = setTimeout(connect, 2000);
@@ -37,6 +57,7 @@ export function useEvents() {
     return () => {
       closed = true;
       clearTimeout(retry);
+      clearTimeout(flushTimer);
       ws && ws.close();
     };
   }, [qc]);

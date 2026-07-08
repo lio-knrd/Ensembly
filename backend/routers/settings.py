@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
-from ..adapters.registry import IMAGE_MODEL_OPTIONS, active_image_model
+from ..adapters.registry import IMAGE_MODEL_OPTIONS, active_image_model, tts_voice_label
 from ..config import settings as app_settings
 from ..database import get_session
 from ..schemas import SettingsUpdate
@@ -33,7 +33,7 @@ def read_settings(session: Session = Depends(get_session)):
             else app_settings.openai_script_model,
             "image": image_model,
             "video": app_settings.fal_video_model,
-            "tts": f"{app_settings.elevenlabs_model} ({app_settings.elevenlabs_voice_id})",
+            "tts": f"{app_settings.elevenlabs_model} ({tts_voice_label(app_settings.elevenlabs_voice_id)})",
         },
     }
 

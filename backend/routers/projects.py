@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from ..adapters.registry import tts_voice_label
 from .. import pipeline
 from ..database import get_session
 from ..models import Character, ContentPreset, Project, ProjectCharacter, Scene, SceneType, Stage
@@ -27,7 +28,7 @@ def list_projects(session: Session = Depends(get_session)):
             select(Scene).where(Scene.project_id == p.id).order_by(Scene.order_index)
         ).first()
         thumb = first.image_path if first and first.image_path else None
-        out.append({**p.model_dump(), "thumbnail": thumb})
+        out.append({**p.model_dump(), "thumbnail": thumb, "thumbnail_version": first.asset_version if first else 0})
     return out
 
 
@@ -67,11 +68,15 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
     ).all()
     characters = [session.get(Character, cid).model_dump() for cid in char_ids if session.get(Character, cid)]
     project_data = project.model_dump()
+    project_data["voice_name"] = tts_voice_label(None)
+    project_data["voice_id"] = ""
     if project.content_preset_id:
         content = session.get(ContentPreset, project.content_preset_id)
         if content:
             project_data["content_preset_name"] = content.name
             project_data["visual_style_prompt"] = content.image_style_prompt
+            project_data["voice_id"] = content.voice_id
+            project_data["voice_name"] = tts_voice_label(content.voice_id)
     return ProjectDetail(
         project=project_data,
         scenes=[s.model_dump() for s in scenes],

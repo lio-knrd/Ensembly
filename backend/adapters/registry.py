@@ -37,6 +37,13 @@ IMAGE_MODEL_OPTIONS = [
     },
 ]
 
+def tts_voice_label(voice_id: str | None) -> str:
+    if not voice_id:
+        return "Configured default"
+    if voice_id == settings.elevenlabs_voice_id:
+        return "Configured default"
+    return voice_id
+
 
 def _setting(key: str, default):
     with Session(engine) as session:
@@ -71,9 +78,9 @@ def get_script_generator() -> ScriptGenerator:
     raise RuntimeError("No LLM API key configured and offline fallback disabled.")
 
 
-def get_tts_generator() -> TTSGenerator:
+def get_tts_generator(voice_id: str | None = None) -> TTSGenerator:
     if settings.elevenlabs_api_key:
-        return ElevenLabsTTSGenerator()
+        return ElevenLabsTTSGenerator(voice_id=voice_id)
     if _offline_ok():
         return OfflineTTSGenerator()
     raise RuntimeError("No ElevenLabs API key configured and offline fallback disabled.")

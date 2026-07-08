@@ -29,10 +29,13 @@ def _estimate_duration(text: str) -> float:
 class ElevenLabsTTSGenerator(TTSGenerator):
     name = "elevenlabs"
 
+    def __init__(self, voice_id: str | None = None) -> None:
+        self.voice_id = (voice_id or settings.elevenlabs_voice_id).strip()
+
     def synthesize(self, text, audio_out: Path, timestamps_out: Path) -> TTSResult:
         url = (
             f"https://api.elevenlabs.io/v1/text-to-speech/"
-            f"{settings.elevenlabs_voice_id}/with-timestamps"
+            f"{self.voice_id}/with-timestamps"
         )
         resp = httpx.post(
             url,

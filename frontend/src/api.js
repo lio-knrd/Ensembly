@@ -19,8 +19,11 @@ async function req(path, options = {}) {
   return ct.includes("application/json") ? res.json() : res.text();
 }
 
-export const mediaUrl = (relPath) =>
-  relPath ? `/media/${relPath.replace(/^\/+/, "")}` : null;
+export const mediaUrl = (relPath, version) => {
+  if (!relPath) return null;
+  const url = `/media/${relPath.replace(/^\/+/, "")}`;
+  return version == null ? url : `${url}?v=${encodeURIComponent(version)}`;
+};
 
 export const api = {
   // Projects
@@ -95,6 +98,7 @@ export const api = {
     req(`/api/presets/content/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteContentPreset: (id) =>
     req(`/api/presets/content/${id}`, { method: "DELETE" }),
+  listVoices: () => req("/api/voices"),
 
   // Ideas
   listIdeas: () => req("/api/ideas"),
