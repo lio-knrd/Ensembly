@@ -16,6 +16,7 @@ export default function ProjectDetail() {
 
   if (isLoading || !data) return <div className="empty">Loading…</div>;
   const { project, scenes, metadata, characters } = data;
+  const visualStyle = project.visual_style_prompt || "";
 
   return (
     <>
@@ -29,6 +30,11 @@ export default function ProjectDetail() {
             <span>{project.topic_prompt}</span>
             <span>·</span>
             <span>{project.target_duration_seconds}s target</span>
+            {visualStyle && (
+              <span className="style-chip" title={visualStyle}>
+                Style: {project.content_preset_name || "content preset"}
+              </span>
+            )}
             {characters.length > 0 && (
               <span className="tag">{characters.length} characters</span>
             )}
@@ -42,7 +48,7 @@ export default function ProjectDetail() {
 
       {project.error && <div className="banner">Error — {project.error}</div>}
 
-      {project.stage === "CAST_REVIEW" && <CastPanel project={project} />}
+      {project.stage === "CAST_REVIEW" && <CastPanel project={project} visualStyle={visualStyle} />}
 
       {project.stage === "DONE" && (
         <FinalPanel project={project} metadata={metadata} />
@@ -50,7 +56,13 @@ export default function ProjectDetail() {
 
       <div className="scenes">
         {scenes.map((s) => (
-          <SceneCard key={s.id} projectId={id} scene={s} stage={project.stage} />
+          <SceneCard
+            key={s.id}
+            projectId={id}
+            scene={s}
+            stage={project.stage}
+            visualStyle={visualStyle}
+          />
         ))}
       </div>
     </>
@@ -86,9 +98,30 @@ function StageBar({ project, scenes }) {
   const approveStoryboard = call(() => api.approveStoryboard(id));
   const approveClips = call(() => api.approveClips(id));
   const regenScript = call(() => api.regenScript(id));
+  const stepBack = call(() => api.stepBack(id));
+  const stepForward = call(() => api.stepForward(id));
+  const retryFailedStep = call(() => api.retryFailedStep(id));
+  const cancelProject = call(() => api.cancelProject(id));
   const rerender = call(() => api.rerender(id));
 
   const generating = isGenerating(project.stage);
+  const canStepBack = ["SCRIPT_READY", "CAST_REVIEW", "STORYBOARD_READY", "CLIPS_READY", "DONE"].includes(project.stage);
+  const castBusy = project.stage === "CAST_REVIEW" && (project.status_message || "").startsWith("Generating");
+  const navMode = ["Moved back one step", "Moved forward one step"].includes(project.status_message || "");
+  const hasScenes = scenes.length > 0;
+  const sceneBusy = scenes.some((scene) => scene.status === "generating");
+  const working = generating || castBusy || sceneBusy;
+  const audioReady = hasScenes && scenes.every((scene) => scene.audio_path);
+  const storyboardReady = hasScenes && scenes.every((scene) => scene.image_path);
+  const videoScenes = scenes.filter((scene) => scene.scene_type === "video");
+  const clipsReady = hasScenes && videoScenes.every((scene) => scene.clip_path);
+  const canStepForward =
+    navMode &&
+    ((project.stage === "IDEA" && hasScenes) ||
+      (project.stage === "SCRIPT_READY" && audioReady) ||
+      (project.stage === "CAST_REVIEW" && storyboardReady) ||
+      (project.stage === "STORYBOARD_READY" && clipsReady) ||
+      (project.stage === "CLIPS_READY" && project.status_message === "Moved back one step"));
 
   let action = null;
   if (generating) {
@@ -137,8 +170,14 @@ function StageBar({ project, scenes }) {
     );
   } else if (project.stage === "FAILED") {
     action = (
-      <button className="btn" onClick={() => regenScript.mutate()}>
-        Retry from script
+      <button className="btn" disabled={retryFailedStep.isPending} onClick={() => retryFailedStep.mutate()}>
+        Retry failed step
+      </button>
+    );
+  } else if (project.stage === "CANCELED") {
+    action = (
+      <button className="btn" disabled={retryFailedStep.isPending} onClick={() => retryFailedStep.mutate()}>
+        Resume canceled step
       </button>
     );
   } else if (project.stage === "IDEA") {
@@ -159,12 +198,29 @@ function StageBar({ project, scenes }) {
           {scenes.length} scenes · {approvedCount} approved
         </div>
       </div>
-      {action}
+      <div className="stage-actions">
+        {working && (
+          <button className="btn danger" disabled={cancelProject.isPending} onClick={() => cancelProject.mutate()}>
+            Cancel
+          </button>
+        )}
+        {canStepBack && !working && (
+          <button className="btn" disabled={stepBack.isPending} onClick={() => stepBack.mutate()}>
+            Back one step
+          </button>
+        )}
+        {canStepForward && !working && (
+          <button className="btn" disabled={stepForward.isPending} onClick={() => stepForward.mutate()}>
+            Forward one step
+          </button>
+        )}
+        {action}
+      </div>
     </div>
   );
 }
 
-function CastPanel({ project }) {
+function CastPanel({ project, visualStyle }) {
   const id = project.id;
   const qc = useQueryClient();
   const { data: cast = [] } = useQuery({
@@ -198,6 +254,11 @@ function CastPanel({ project }) {
               ? `${missing} of ${cast.length} character${cast.length === 1 ? "" : "s"} still need a reference sheet. Sheets keep each character's look consistent across every scene (visual style comes from the content preset).`
               : "All character sheets are ready. Approve to generate the storyboard images."}
           </p>
+          {visualStyle && (
+            <div className="style-summary" title={visualStyle}>
+              Character sheets use style: {visualStyle}
+            </div>
+          )}
         </div>
         <div className="row">
           {missing > 0 && (
@@ -348,7 +409,7 @@ function FinalPanel({ project, metadata }) {
   );
 }
 
-function SceneCard({ projectId, scene, stage }) {
+function SceneCard({ projectId, scene, stage, visualStyle }) {
   const qc = useQueryClient();
   const invalidate = () => qc.invalidateQueries({ queryKey: ["project", projectId] });
 
@@ -412,6 +473,12 @@ function SceneCard({ projectId, scene, stage }) {
             prompt !== scene.image_prompt && save.mutate({ image_prompt: prompt })
           }
         />
+        {visualStyle && (
+          <div className="scene-style" title={visualStyle}>
+            <span>Generation style</span>
+            <strong>{visualStyle}</strong>
+          </div>
+        )}
         <div className="scene-meta-row">
           <div className="seg">
             <button

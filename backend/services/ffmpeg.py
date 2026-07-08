@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -73,13 +74,17 @@ def ken_burns_clip(image_path: Path, out_path: Path, duration: float) -> Path:
 
 
 def _normalize_clip(clip_path: Path, out_path: Path, duration: float) -> Path:
-    """Existing motion clip -> WxH, trimmed/looped to exactly `duration`."""
+    """Existing motion clip -> WxH, trimmed or frozen on its final frame."""
+    clip_duration = _probe_duration(clip_path)
+    pad = max(0.0, duration - clip_duration) if clip_duration > 0 else duration
     vf = (
         f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-        f"crop={W}:{H},fps={FPS},format=yuv420p"
+        f"crop={W}:{H},fps={FPS},"
+        f"tpad=stop_mode=clone:stop_duration={pad:.3f},"
+        f"format=yuv420p"
     )
     _run([
-        "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(clip_path),
+        "ffmpeg", "-y", "-i", str(clip_path),
         "-t", f"{duration:.3f}", "-an", "-vf", vf,
         "-c:v", "libx264", "-preset", "medium", str(out_path),
     ])
@@ -135,15 +140,61 @@ def _fmt_ass_time(t: float) -> str:
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def build_ass_captions(timeline: dict, out_path: Path, max_words: int = 6, max_span: float = 3.2) -> Path:
-    """Group words into short synced caption lines and write an .ass file."""
+def _ass_escape(text: str) -> str:
+    text = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+    return text.replace("\n", " ")
+
+
+def _caption_lines(words: list[dict], max_line_chars: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        token = str(word.get("word", "")).strip()
+        candidate = f"{current} {token}".strip()
+        if current and len(candidate) > max_line_chars:
+            lines.append(current)
+            current = token
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _caption_text(words: list[dict], max_line_chars: int) -> str:
+    text = " ".join(str(w.get("word", "")) for w in words).strip()
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    cleaned = [{"word": w} for w in text.split()]
+    return r"\N".join(_ass_escape(line) for line in _caption_lines(cleaned, max_line_chars))
+
+
+def _ends_sentence(word: str) -> bool:
+    return bool(re.search(r"[.!?][\"')\]]*$", word.strip()))
+
+
+def _soft_break(word: str) -> bool:
+    return bool(re.search(r"[,;:][\"')\]]*$", word.strip()))
+
+
+def build_ass_captions(
+    timeline: dict,
+    out_path: Path,
+    max_words: int = 10,
+    max_span: float = 4.2,
+    max_line_chars: int = 24,
+    max_lines: int = 2,
+) -> Path:
+    """Group word timings into sentence-aware caption events and write ASS."""
     header = (
         "[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\n"
-        "WrapStyle: 2\n\n"
+        "WrapStyle: 0\n\n"
         "[V4+ Styles]\n"
-        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, "
-        "Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV\n"
-        "Style: Caption,Arial,64,&H00FFFFFF,&H00000000,&H80000000,-1,0,1,4,1,2,80,80,220\n\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+        "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+        "MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Caption,Arial,78,&H00FFFFFF,&H000000FF,&H00000000,&HA0000000,"
+        "-1,0,0,0,100,100,0,0,1,7,3,2,96,96,245,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     ) % (W, H)
 
@@ -153,14 +204,23 @@ def build_ass_captions(timeline: dict, out_path: Path, max_words: int = 6, max_s
     while i < len(words):
         group = [words[i]]
         j = i + 1
-        while (
-            j < len(words)
-            and len(group) < max_words
-            and (words[j]["end"] - group[0]["start"]) <= max_span
-        ):
+        while j < len(words):
+            prev = group[-1]
+            if _ends_sentence(str(prev.get("word", ""))):
+                break
+            span_if_added = words[j]["end"] - group[0]["start"]
+            lines_if_added = _caption_lines([*group, words[j]], max_line_chars)
+            too_long = len(group) >= max_words or span_if_added > max_span
+            too_wide = len(lines_if_added) > max_lines
+            if too_wide:
+                break
+            if too_long and _soft_break(str(prev.get("word", ""))):
+                break
+            if len(group) >= max_words + 4 or span_if_added > max_span + 1.8:
+                break
             group.append(words[j])
             j += 1
-        text = " ".join(w["word"] for w in group)
+        text = _caption_text(group, max_line_chars)
         start = _fmt_ass_time(group[0]["start"])
         end = _fmt_ass_time(group[-1]["end"])
         lines.append(f"Dialogue: 0,{start},{end},Caption,,0,0,0,,{text}")

@@ -40,6 +40,11 @@ export const api = {
   approveStoryboard: (id) =>
     req(`/api/projects/${id}/approve-storyboard`, { method: "POST" }),
   approveClips: (id) => req(`/api/projects/${id}/approve-clips`, { method: "POST" }),
+  stepBack: (id) => req(`/api/projects/${id}/step-back`, { method: "POST" }),
+  stepForward: (id) => req(`/api/projects/${id}/step-forward`, { method: "POST" }),
+  retryFailedStep: (id) =>
+    req(`/api/projects/${id}/retry-failed-step`, { method: "POST" }),
+  cancelProject: (id) => req(`/api/projects/${id}/cancel`, { method: "POST" }),
   rerender: (id) => req(`/api/projects/${id}/render`, { method: "POST" }),
 
   // Scenes

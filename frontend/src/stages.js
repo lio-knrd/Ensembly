@@ -25,7 +25,7 @@ export const COLUMNS = [
 ];
 
 export function columnForStage(stage) {
-  if (stage === "FAILED") return "IDEA";
+  if (stage === "CANCELED" || stage === "FAILED") return "IDEA";
   const col = COLUMNS.find((c) => c.stages.includes(stage));
   return col ? col.key : "IDEA";
 }
@@ -45,6 +45,7 @@ const LABELS = {
   CLIPS_APPROVED: "Clips approved",
   RENDERING: "Rendering…",
   DONE: "Done",
+  CANCELED: "Canceled",
   FAILED: "Failed",
 };
 
@@ -52,6 +53,7 @@ export const stageLabel = (stage) => LABELS[stage] || stage;
 
 // Pill visual tone by stage.
 export function stageTone(stage) {
+  if (stage === "CANCELED") return "muted";
   if (stage === "FAILED") return "danger";
   if (stage === "DONE") return "success";
   if (stage.endsWith("_GENERATING") || stage === "RENDERING") return "active";

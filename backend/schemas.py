@@ -87,3 +87,4 @@ class SettingsUpdate(BaseModel):
     default_duration_seconds: Optional[int] = None
     default_platform_preset_name: Optional[str] = None
     default_content_preset_name: Optional[str] = None
+    active_image_model: Optional[str] = None

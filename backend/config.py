@@ -52,6 +52,7 @@ class Settings(BaseModel):
     openai_script_model: str = "gpt-4o"
     # Image generation (fal.ai model slug)
     fal_image_model: str = "fal-ai/flux/dev"
+    fal_krea_image_model: str = "krea/v2/medium/text-to-image"
     # Image-to-video generation (fal.ai model slug)
     fal_video_model: str = "fal-ai/kling-video/v3/standard/image-to-video"
     # TTS (ElevenLabs voice + model)

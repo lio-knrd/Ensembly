@@ -19,7 +19,7 @@ class FalVideoGenerator(VideoGenerator):
     # Kling v3 accepts an integer seconds duration in [3, 15] (sent as a string).
     _MIN_DURATION, _MAX_DURATION = 3, 15
     # Kling caps how many identity elements a single clip can reference.
-    _MAX_ELEMENTS = 4
+    _MAX_ELEMENTS = 3
 
     def generate(
         self,

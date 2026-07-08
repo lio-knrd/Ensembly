@@ -29,7 +29,11 @@ For each scene you must provide:
     markdown, no bracketed notes. This text is fed verbatim to text-to-speech.
   - image_prompt: a vivid, self-contained prompt for an image model describing \
     the visual for this scene. Describe subject, setting, mood, composition, and \
-    art style. Do not reference other scenes.
+    camera/framing. Do NOT include named art styles, renderer styles, medium \
+    styles, or aesthetic labels; the visual style is applied later from the \
+    active content preset. If named characters appear, include their exact names \
+    and role/action in the image_prompt so downstream image and video models can \
+    match them to their reference images. Do not reference other scenes.
   - scene_type: either "still" or "video". Default to "still". Mark a small \
     number of pivotal "hero" moments as "video" when motion would add real impact.
   - characters: a list of named characters that appear in this scene (e.g. \
@@ -70,7 +74,11 @@ def build_script_prompt(
         "",
         "Write the full narrated script now, following the platform conventions "
         "and content tone above, and return the structured scene list plus social "
-        "metadata.",
+        "metadata. Keep image_prompt values style-neutral: describe only the "
+        "scene content, mood, composition, lighting, and framing. Do not include "
+        "art style words because image/video style is applied separately from "
+        "the content preset. When a scene includes characters, put their exact "
+        "names and clear actions/positions in the image_prompt.",
     ]
     return "\n".join(parts)
 

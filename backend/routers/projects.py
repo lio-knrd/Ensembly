@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 
 from .. import pipeline
 from ..database import get_session
-from ..models import Character, Project, ProjectCharacter, Scene, SceneType, Stage
+from ..models import Character, ContentPreset, Project, ProjectCharacter, Scene, SceneType, Stage
 from ..schemas import CastSheetGenerate, ProjectCreate, ProjectDetail, SceneUpdate
 from .common import (
     default_content_preset,
@@ -66,8 +66,14 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
         select(ProjectCharacter.character_id).where(ProjectCharacter.project_id == project_id)
     ).all()
     characters = [session.get(Character, cid).model_dump() for cid in char_ids if session.get(Character, cid)]
+    project_data = project.model_dump()
+    if project.content_preset_id:
+        content = session.get(ContentPreset, project.content_preset_id)
+        if content:
+            project_data["content_preset_name"] = content.name
+            project_data["visual_style_prompt"] = content.image_style_prompt
     return ProjectDetail(
-        project=project.model_dump(),
+        project=project_data,
         scenes=[s.model_dump() for s in scenes],
         metadata=project_metadata(project.folder_path),
         characters=characters,
@@ -148,6 +154,34 @@ def approve_storyboard(project_id: str, session: Session = Depends(get_session))
 def approve_clips(project_id: str, session: Session = Depends(get_session)):
     _require(session, project_id)
     pipeline.submit(pipeline.approve_clips, project_id)
+    return {"ok": True}
+
+
+@router.post("/{project_id}/step-back")
+def step_back(project_id: str, session: Session = Depends(get_session)):
+    _require(session, project_id)
+    pipeline.submit(pipeline.step_back, project_id)
+    return {"ok": True}
+
+
+@router.post("/{project_id}/step-forward")
+def step_forward(project_id: str, session: Session = Depends(get_session)):
+    _require(session, project_id)
+    pipeline.submit(pipeline.step_forward, project_id)
+    return {"ok": True}
+
+
+@router.post("/{project_id}/retry-failed-step")
+def retry_failed_step(project_id: str, session: Session = Depends(get_session)):
+    _require(session, project_id)
+    pipeline.submit(pipeline.retry_failed_step, project_id)
+    return {"ok": True}
+
+
+@router.post("/{project_id}/cancel")
+def cancel_project(project_id: str, session: Session = Depends(get_session)):
+    _require(session, project_id)
+    pipeline.cancel_project(project_id)
     return {"ok": True}
 
 

@@ -10,7 +10,7 @@ from sqlmodel import Session, func, select
 from ..adapters import get_image_generator
 from ..config import settings
 from ..database import get_session
-from ..models import Character, ProjectCharacter
+from ..models import Character, ProjectCharacter, Scene
 from ..schemas import CharacterCreate, CharacterUpdate
 from ..storage import character_folder
 
@@ -55,6 +55,8 @@ def create_character(body: CharacterCreate, session: Session = Depends(get_sessi
         try:
             out = get_image_generator().generate(prompt, folder / "reference.png", None)
             char.reference_image_path = _rel(out)
+            char.reference_prompt = prompt
+            char.reference_style_prompt = ""
             session.add(char)
             session.commit()
         except Exception as exc:  # noqa: BLE001
@@ -82,6 +84,13 @@ def delete_character(character_id: str, session: Session = Depends(get_session))
     char = session.get(Character, character_id)
     if not char:
         raise HTTPException(404, "Character not found")
+    for scene in session.exec(select(Scene)):
+        if character_id not in scene.character_ids:
+            continue
+        scene.character_ids = [cid for cid in scene.character_ids if cid != character_id]
+        if not any(name.lower() == char.name.lower() for name in scene.suggested_characters):
+            scene.suggested_characters = [*scene.suggested_characters, char.name]
+        session.add(scene)
     for link in session.exec(
         select(ProjectCharacter).where(ProjectCharacter.character_id == character_id)
     ):
@@ -102,6 +111,8 @@ async def upload_reference(
     dest = folder / f"reference{suffix}"
     dest.write_bytes(await file.read())
     char.reference_image_path = _rel(dest)
+    char.reference_prompt = ""
+    char.reference_style_prompt = ""
     session.add(char)
     session.commit()
     _write_metadata(folder, char)
@@ -123,15 +134,25 @@ def regenerate_reference(character_id: str, session: Session = Depends(get_sessi
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"Reference image generation failed: {exc}")
     char.reference_image_path = _rel(out)
+    char.reference_prompt = prompt
+    char.reference_style_prompt = ""
     session.add(char)
     session.commit()
+    _write_metadata(folder, char)
     return _serialize(session, char)
 
 
 def _write_metadata(folder: Path, char: Character) -> None:
     (folder / "metadata.json").write_text(
         json.dumps(
-            {"id": char.id, "name": char.name, "description": char.description},
+            {
+                "id": char.id,
+                "name": char.name,
+                "description": char.description,
+                "reference_prompt": char.reference_prompt,
+                "reference_style_prompt": char.reference_style_prompt,
+                "reference_image_path": char.reference_image_path,
+            },
             indent=2,
         ),
         encoding="utf-8",

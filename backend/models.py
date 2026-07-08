@@ -39,6 +39,7 @@ class Stage(str, Enum):
     CLIPS_APPROVED = "CLIPS_APPROVED"
     RENDERING = "RENDERING"
     DONE = "DONE"
+    CANCELED = "CANCELED"
     FAILED = "FAILED"
 
 
@@ -64,6 +65,9 @@ class Project(SQLModel, table=True):
     # Free-form status text surfaced during long-running generation, plus any error.
     status_message: Optional[str] = None
     error: Optional[str] = None
+    failed_stage: Optional[str] = None
+    cancel_requested: bool = False
+    canceled_stage: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -97,6 +101,8 @@ class Character(SQLModel, table=True):
     name: str
     description: str = ""
     reference_image_path: Optional[str] = None
+    reference_prompt: str = ""
+    reference_style_prompt: str = ""
     variant_paths: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 

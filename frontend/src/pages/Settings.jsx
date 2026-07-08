@@ -6,12 +6,20 @@ export default function Settings() {
   const qc = useQueryClient();
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const [duration, setDuration] = useState("");
+  const [imageModel, setImageModel] = useState("");
   useEffect(() => {
     if (settings) setDuration(settings.default_duration_seconds);
   }, [settings?.default_duration_seconds]);
+  useEffect(() => {
+    if (settings) setImageModel(settings.models.image);
+  }, [settings?.models?.image]);
 
   const saveDuration = useMutation({
     mutationFn: () => api.updateSettings({ default_duration_seconds: Number(duration) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const saveImageModel = useMutation({
+    mutationFn: () => api.updateSettings({ active_image_model: imageModel }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
 
@@ -54,7 +62,7 @@ export default function Settings() {
       <div className="panel">
         <h2>Active models</h2>
         <p className="panel-sub">
-          One model per stage — a config/constants concern (no in-app switching in v1).
+          Image generation can be switched here; other stages still use the configured defaults.
         </p>
         <div className="key-row">
           <span>Script generation ({settings.active_llm_provider})</span>
@@ -62,8 +70,30 @@ export default function Settings() {
         </div>
         <div className="key-row">
           <span>Image generation</span>
-          <span className="muted">{settings.models.image}</span>
+          <div className="row model-select-row">
+            <select value={imageModel} onChange={(e) => setImageModel(e.target.value)}>
+              {settings.image_model_options.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn sm"
+              disabled={!imageModel || imageModel === settings.models.image || saveImageModel.isPending}
+              onClick={() => saveImageModel.mutate()}
+            >
+              {saveImageModel.isPending ? "Saving..." : "Save"}
+            </button>
+          </div>
         </div>
+        {settings.image_model_options
+          .filter((option) => option.id === imageModel)
+          .map((option) => (
+            <div className="model-note" key={option.id}>
+              {option.id} · {option.description}
+            </div>
+          ))}
         <div className="key-row">
           <span>Video generation</span>
           <span className="muted">{settings.models.video}</span>

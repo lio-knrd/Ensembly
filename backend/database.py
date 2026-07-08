@@ -12,6 +12,11 @@ from .config import settings
 # existing tables). Each entry: table, column, SQL type + default.
 _ADDED_COLUMNS = [
     ("content_presets", "image_style_prompt", "TEXT DEFAULT ''"),
+    ("characters", "reference_prompt", "TEXT DEFAULT ''"),
+    ("characters", "reference_style_prompt", "TEXT DEFAULT ''"),
+    ("projects", "failed_stage", "TEXT DEFAULT NULL"),
+    ("projects", "cancel_requested", "BOOLEAN DEFAULT 0"),
+    ("projects", "canceled_stage", "TEXT DEFAULT NULL"),
 ]
 
 # check_same_thread=False so background tasks (different thread) can use sessions.

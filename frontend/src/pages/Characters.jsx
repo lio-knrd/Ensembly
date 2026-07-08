@@ -9,13 +9,18 @@ export default function Characters() {
     queryKey: ["characters"],
     queryFn: api.listCharacters,
   });
+  const readyCount = characters.filter((c) => c.reference_image_path).length;
 
   return (
     <>
-      <div className="page-head">
+      <div className="page-head character-page-head">
         <div>
           <h1>Character library</h1>
-          <p>Global characters — projects reference them; images stay identity-locked.</p>
+          <p>Global character sheets used by projects for identity consistency.</p>
+          <div className="character-stats">
+            <span>{characters.length} characters</span>
+            <span>{readyCount} sheets ready</span>
+          </div>
         </div>
         <button className="btn primary" onClick={() => setShowNew(true)}>
           + Add character
@@ -23,11 +28,14 @@ export default function Characters() {
       </div>
 
       {isLoading ? (
-        <div className="empty">Loading…</div>
+        <div className="empty">Loading...</div>
       ) : characters.length === 0 ? (
-        <div className="empty">No characters yet.</div>
+        <div className="character-empty">
+          <strong>No characters yet.</strong>
+          <span>Add one to create a reusable reference sheet.</span>
+        </div>
       ) : (
-        <div className="grid">
+        <div className="character-grid">
           {characters.map((c) => (
             <CharacterCard key={c.id} character={c} />
           ))}
@@ -53,33 +61,76 @@ function CharacterCard({ character }) {
   });
 
   const img = mediaUrl(character.reference_image_path);
+  const hasSheet = Boolean(character.reference_image_path);
+  const hasDescription = Boolean(character.description?.trim());
+  const styleText = character.reference_style_prompt?.trim();
+  const promptText = character.reference_prompt?.trim();
+  const sheetButtonText = hasSheet
+    ? "Regenerate character sheet from description"
+    : "Generate character sheet from description";
 
   return (
     <div className="char-card">
-      <div
-        className="char-thumb"
-        style={img ? { backgroundImage: `url(${img})` } : undefined}
-      >
-        {!img && "🗿"}
-      </div>
-      <div className="char-body">
-        <h3>{character.name}</h3>
-        <p>{character.description || "No description."}</p>
-        <div className="char-used" style={{ marginBottom: 10 }}>
-          Used in {character.used_in_projects} project
-          {character.used_in_projects === 1 ? "" : "s"}
+      <div className="char-media">
+        <div
+          className="char-thumb"
+          style={img ? { backgroundImage: `url(${img})` } : undefined}
+        >
+          {!img && <span>No sheet</span>}
         </div>
-        <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+        <div className={"char-sheet-state " + (hasSheet ? "ready" : "missing")}>
+          {hasSheet ? "Sheet ready" : "Missing sheet"}
+        </div>
+      </div>
+
+      <div className="char-body">
+        <div className="char-title-row">
+          <div>
+            <h3>{character.name}</h3>
+            <div className="char-used">
+              Used in {character.used_in_projects} project
+              {character.used_in_projects === 1 ? "" : "s"}
+            </div>
+          </div>
           <button className="btn sm" onClick={() => setEditing(true)}>
             Edit
           </button>
-          <button className="btn sm" disabled={regen.isPending} onClick={() => regen.mutate()}>
-            {regen.isPending ? "…" : "Generate ref"}
+        </div>
+
+        <p className="char-description">{character.description || "No description yet."}</p>
+
+        <div className="char-sheet-meta">
+          <div>
+            <span>Generated style</span>
+            <strong title={styleText || ""}>
+              {styleText || (hasSheet ? "No stored style" : "None yet")}
+            </strong>
+          </div>
+          <div>
+            <span>Sheet prompt source</span>
+            <strong title={promptText || ""}>
+              {promptText ? "Saved generation prompt" : "Character description"}
+            </strong>
+          </div>
+        </div>
+
+        {regen.isError && <div className="banner compact">{String(regen.error.message)}</div>}
+        {del.isError && <div className="banner compact">{String(del.error.message)}</div>}
+        {upload.isError && <div className="banner compact">{String(upload.error.message)}</div>}
+
+        <div className="char-actions">
+          <button
+            className="btn primary"
+            disabled={regen.isPending || !hasDescription}
+            onClick={() => regen.mutate()}
+            title={!hasDescription ? "Add a description before generating a sheet." : undefined}
+          >
+            {regen.isPending ? "Generating new sheet..." : sheetButtonText}
           </button>
-          <button className="btn sm" onClick={() => fileRef.current.click()}>
-            Upload
+          <button className="btn" onClick={() => fileRef.current.click()}>
+            Upload sheet
           </button>
-          <button className="btn sm danger" onClick={() => del.mutate()}>
+          <button className="btn danger" onClick={() => del.mutate()}>
             Delete
           </button>
           <input
@@ -91,6 +142,7 @@ function CharacterCard({ character }) {
           />
         </div>
       </div>
+
       {editing && (
         <CharacterModal character={character} onClose={() => setEditing(false)} />
       )}
@@ -128,18 +180,17 @@ function CharacterModal({ character, onClose }) {
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="King of the gods, silver beard, storm-grey robes, holds a lightning bolt…"
+          placeholder="King of the gods, silver beard, storm-grey robes, holds a lightning bolt..."
         />
       </div>
       {!editing && (
-        <label className="row" style={{ fontSize: 13.5, cursor: "pointer" }}>
+        <label className="check-row">
           <input
             type="checkbox"
-            style={{ width: "auto" }}
             checked={generate}
             onChange={(e) => setGenerate(e.target.checked)}
           />
-          Generate a reference image from the description now
+          Generate a character sheet from this description now
         </label>
       )}
       {save.isError && <div className="banner">{String(save.error.message)}</div>}
@@ -152,7 +203,7 @@ function CharacterModal({ character, onClose }) {
           disabled={!name.trim() || save.isPending}
           onClick={() => save.mutate()}
         >
-          {save.isPending ? "Saving…" : editing ? "Save" : "Add"}
+          {save.isPending ? "Saving..." : editing ? "Save" : "Add"}
         </button>
       </div>
     </Modal>

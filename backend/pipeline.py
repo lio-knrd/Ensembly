@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 
 from sqlmodel import Session, select
 
@@ -39,11 +40,28 @@ from .services import ffmpeg
 from .storage import project_folder
 
 _executor = ThreadPoolExecutor(max_workers=2)
+_jobs_by_project: dict[str, set[Future]] = {}
+_jobs_lock = Lock()
 
 
 def submit(fn, *args) -> None:
     """Enqueue a pipeline step to run off the request thread."""
-    _executor.submit(_guarded, fn, *args)
+    project_id = args[0] if args and isinstance(args[0], str) else None
+    future = _executor.submit(_guarded, fn, *args)
+    if project_id:
+        with _jobs_lock:
+            _jobs_by_project.setdefault(project_id, set()).add(future)
+        future.add_done_callback(lambda done, pid=project_id: _forget_job(pid, done))
+
+
+def _forget_job(project_id: str, future: Future) -> None:
+    with _jobs_lock:
+        jobs = _jobs_by_project.get(project_id)
+        if not jobs:
+            return
+        jobs.discard(future)
+        if not jobs:
+            _jobs_by_project.pop(project_id, None)
 
 
 def _guarded(fn, *args) -> None:
@@ -65,6 +83,10 @@ def _set_stage(session: Session, project: Project, stage: Stage, message: str | 
     project.status_message = message
     if stage != Stage.FAILED:
         project.error = None
+        project.failed_stage = None
+    if stage != Stage.CANCELED:
+        project.cancel_requested = False
+        project.canceled_stage = None
     _touch(project)
     session.add(project)
     session.commit()
@@ -72,13 +94,52 @@ def _set_stage(session: Session, project: Project, stage: Stage, message: str | 
 
 
 def _fail(session: Session, project: Project, where: str, exc: Exception) -> None:
+    project.failed_stage = project.stage.value
     project.stage = Stage.FAILED
     project.error = f"{where}: {exc}"
     project.status_message = None
+    project.cancel_requested = False
     _touch(project)
     session.add(project)
     session.commit()
     bus.publish("project.failed", project_id=project.id, error=project.error)
+
+
+def cancel_project(project_id: str) -> None:
+    """Request cancellation for queued/running work for one project."""
+    with _jobs_lock:
+        for future in list(_jobs_by_project.get(project_id, set())):
+            future.cancel()
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            return
+        _mark_canceled(session, project)
+
+
+def _mark_canceled(session: Session, project: Project) -> None:
+    if project.stage != Stage.CANCELED:
+        project.canceled_stage = project.stage.value
+    project.stage = Stage.CANCELED
+    project.cancel_requested = True
+    project.error = None
+    project.status_message = "Canceled"
+    _touch(project)
+    session.add(project)
+    for scene in session.exec(select(Scene).where(Scene.project_id == project.id, Scene.status == "generating")):
+        scene.status = "pending"
+        session.add(scene)
+        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+    session.commit()
+    bus.publish("project.stage", project_id=project.id, stage=Stage.CANCELED.value, message="Canceled")
+
+
+def _stop_if_canceled(session: Session, project: Project) -> bool:
+    session.refresh(project)
+    if project.cancel_requested or project.stage == Stage.CANCELED:
+        _mark_canceled(session, project)
+        return True
+    return False
 
 
 def _folder(project: Project) -> Path:
@@ -95,7 +156,12 @@ def _content_style(session: Session, project: Project) -> str:
 
 def _apply_style(prompt: str, style: str) -> str:
     style = style.strip()
-    return f"{prompt.strip()}\n\nStyle: {style}" if style else prompt.strip()
+    return (
+        f"{prompt.strip()}\n\n"
+        f"Visual style directive (mandatory, overrides any generic render look): {style}"
+        if style
+        else prompt.strip()
+    )
 
 
 def _write_project_snapshot(project: Project, folder: Path) -> None:
@@ -151,7 +217,11 @@ def generate_script(project_id: str) -> None:
                 project.target_duration_seconds,
             )
         except Exception as exc:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             _fail(session, project, "script generation", exc)
+            return
+        if _stop_if_canceled(session, project):
             return
 
         # Persist raw script.json snapshot.
@@ -200,6 +270,8 @@ def generate_script(project_id: str) -> None:
         # Stash metadata in settings-like project field via script.json (already saved).
         session.commit()
         _write_project_snapshot(project, folder)
+        if _stop_if_canceled(session, project):
+            return
         _set_stage(session, project, Stage.SCRIPT_READY, "Script ready for review")
 
 
@@ -214,6 +286,10 @@ def approve_script(project_id: str) -> None:
             return
         _set_stage(session, project, Stage.SCRIPT_APPROVED, "Script approved")
     generate_audio(project_id)
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
+            return
     enter_cast_review(project_id)
 
 
@@ -225,7 +301,7 @@ def enter_cast_review(project_id: str) -> None:
     """
     with Session(engine) as session:
         project = session.get(Project, project_id)
-        if not project or project.stage == Stage.FAILED:
+        if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
             return
         cast = compute_cast(session, project)
         if not cast:
@@ -272,6 +348,135 @@ def approve_clips(project_id: str) -> None:
     render(project_id)
 
 
+def step_back(project_id: str) -> None:
+    """Move one review checkpoint back without deleting generated assets."""
+    previous = {
+        Stage.SCRIPT_READY: Stage.IDEA,
+        Stage.CAST_REVIEW: Stage.SCRIPT_READY,
+        Stage.STORYBOARD_READY: Stage.CAST_REVIEW,
+        Stage.CLIPS_READY: Stage.STORYBOARD_READY,
+        Stage.DONE: Stage.CLIPS_READY,
+    }
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project or project.stage not in previous:
+            return
+        _set_stage(session, project, previous[project.stage], "Moved back one step")
+
+
+def step_forward(project_id: str) -> None:
+    """Move to the next completed checkpoint without regenerating assets."""
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            return
+
+        scenes = session.exec(
+            select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
+        ).all()
+
+        if project.stage == Stage.IDEA and scenes:
+            _set_stage(session, project, Stage.SCRIPT_READY, "Moved forward one step")
+        elif project.stage == Stage.SCRIPT_READY and _audio_ready(scenes):
+            _set_stage(session, project, Stage.CAST_REVIEW, "Moved forward one step")
+        elif project.stage == Stage.CAST_REVIEW and _storyboard_ready(scenes):
+            _set_stage(session, project, Stage.STORYBOARD_READY, "Moved forward one step")
+        elif project.stage == Stage.STORYBOARD_READY and _clips_ready(scenes):
+            _set_stage(session, project, Stage.CLIPS_READY, "Moved forward one step")
+        elif project.stage == Stage.CLIPS_READY and _final_ready(project):
+            _set_stage(session, project, Stage.DONE, "Moved forward one step")
+
+
+def retry_failed_step(project_id: str) -> None:
+    """Retry the pipeline step that failed or was canceled."""
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project or project.stage not in (Stage.CANCELED, Stage.FAILED):
+            return
+        failed_stage = _interrupted_stage(project)
+        resume_stage = failed_stage or Stage.SCRIPT_GENERATING
+        message = "Resuming canceled step" if project.stage == Stage.CANCELED else "Retrying failed step"
+        _set_stage(session, project, resume_stage, message)
+
+    if failed_stage == Stage.SCRIPT_GENERATING:
+        generate_script(project_id)
+    elif failed_stage == Stage.SCRIPT_APPROVED:
+        generate_audio(project_id)
+        enter_cast_review(project_id)
+    elif failed_stage == Stage.AUDIO_GENERATING:
+        generate_audio(project_id)
+        enter_cast_review(project_id)
+    elif failed_stage == Stage.CAST_REVIEW:
+        generate_missing_sheets(project_id)
+    elif failed_stage == Stage.STORYBOARD_GENERATING:
+        generate_storyboard(project_id)
+    elif failed_stage == Stage.STORYBOARD_APPROVED:
+        generate_clips(project_id)
+    elif failed_stage == Stage.CLIPS_GENERATING:
+        generate_clips(project_id)
+    elif failed_stage == Stage.CLIPS_APPROVED:
+        render(project_id)
+    elif failed_stage == Stage.RENDERING:
+        render(project_id)
+    elif failed_stage in (
+        Stage.IDEA,
+        Stage.SCRIPT_READY,
+        Stage.STORYBOARD_READY,
+        Stage.CLIPS_READY,
+        Stage.DONE,
+    ):
+        return
+    else:
+        generate_script(project_id)
+
+
+def _interrupted_stage(project: Project) -> Stage | None:
+    if project.canceled_stage:
+        try:
+            return Stage(project.canceled_stage)
+        except ValueError:
+            pass
+    if project.failed_stage:
+        try:
+            return Stage(project.failed_stage)
+        except ValueError:
+            pass
+    error = (project.error or "").lower()
+    if "audio generation" in error:
+        return Stage.AUDIO_GENERATING
+    if "character sheet" in error:
+        return Stage.CAST_REVIEW
+    if "storyboard generation" in error:
+        return Stage.STORYBOARD_GENERATING
+    if "clip generation" in error:
+        return Stage.CLIPS_GENERATING
+    if "final render" in error:
+        return Stage.RENDERING
+    if "script generation" in error:
+        return Stage.SCRIPT_GENERATING
+    return None
+
+
+def _audio_ready(scenes: list[Scene]) -> bool:
+    return bool(scenes) and all(scene.audio_path for scene in scenes)
+
+
+def _storyboard_ready(scenes: list[Scene]) -> bool:
+    return bool(scenes) and all(scene.image_path for scene in scenes)
+
+
+def _clips_ready(scenes: list[Scene]) -> bool:
+    video_scenes = [scene for scene in scenes if scene.scene_type == SceneType.VIDEO]
+    return bool(scenes) and all(scene.clip_path for scene in video_scenes)
+
+
+def _final_ready(project: Project) -> bool:
+    if not project.folder_path:
+        return False
+    folder = _folder(project)
+    return (folder / "final" / "metadata.json").exists() and any((folder / "final").glob("*.mp4"))
+
+
 # --------------------------------------------------------------------------- #
 # Cast / character sheets (reviewed before scene images are generated)
 # --------------------------------------------------------------------------- #
@@ -311,6 +516,8 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
                 "description": char.description,
                 "has_sheet": has_sheet,
                 "reference_image_path": char.reference_image_path,
+                "reference_prompt": char.reference_prompt,
+                "reference_style_prompt": char.reference_style_prompt,
             })
         else:
             # Suggested-but-not-yet-created character.
@@ -324,6 +531,8 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
                 "description": "",
                 "has_sheet": False,
                 "reference_image_path": None,
+                "reference_prompt": "",
+                "reference_style_prompt": "",
             })
     return cast
 
@@ -343,7 +552,7 @@ def generate_character_sheet(
 
     with Session(engine) as session:
         project = session.get(Project, project_id)
-        if not project:
+        if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
             return
         _set_msg(session, project, f"Generating character sheet: {name}…")
 
@@ -369,19 +578,27 @@ def generate_character_sheet(
                 )
             else:
                 char.description = f"{char.name}, a character in {project.topic_prompt}."
+        if _stop_if_canceled(session, project):
+            return
         session.add(char)
         session.commit()
         session.refresh(char)
 
         style = _content_style(session, project)
-        ref_prompt = prompt.strip() if prompt else _default_sheet_prompt(char.name, char.description, style)
+        ref_prompt = _apply_style(prompt, style) if prompt else _default_sheet_prompt(char.name, char.description, style)
         try:
             folder = character_folder(char.name)
             out = get_image_generator().generate(ref_prompt, folder / "reference.png", None)
+            if _stop_if_canceled(session, project):
+                return
             char.reference_image_path = _rel(out)
+            char.reference_prompt = ref_prompt
+            char.reference_style_prompt = style
             session.add(char)
             session.commit()
         except Exception as exc:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             _fail(session, project, "character sheet", exc)
             return
 
@@ -419,6 +636,10 @@ def generate_missing_sheets(project_id: str) -> None:
             return
         missing = [c["name"] for c in compute_cast(session, project) if not c["has_sheet"]]
     for name in missing:
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            if not project or _stop_if_canceled(session, project):
+                return
         generate_character_sheet(project_id, name, None, None, generate_description=True)
 
 
@@ -455,10 +676,14 @@ def generate_audio(project_id: str) -> None:
         try:
             tts = get_tts_generator()
             for scene in scenes:
+                if _stop_if_canceled(session, project):
+                    return
                 bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="audio")
                 audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
                 ts_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.timestamps.json"
                 result = tts.synthesize(scene.narration_text, audio_out, ts_out)
+                if _stop_if_canceled(session, project):
+                    return
                 scene.audio_path = _rel(audio_out)
                 scene.timestamps_path = _rel(ts_out)
                 scene.duration_seconds = result.duration_seconds
@@ -467,9 +692,13 @@ def generate_audio(project_id: str) -> None:
                 bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
 
             # Concatenate full narration for the final mux.
+            if _stop_if_canceled(session, project):
+                return
             ordered_audio = [Path(settings.projects_dir.parent.parent) / s.audio_path for s in scenes if s.audio_path]
             ffmpeg.concat_audio(ordered_audio, folder / "audio" / "full_narration.mp3")
         except Exception as exc:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             _fail(session, project, "audio generation", exc)
             return
 
@@ -480,7 +709,7 @@ def generate_audio(project_id: str) -> None:
 def generate_storyboard(project_id: str) -> None:
     with Session(engine) as session:
         project = session.get(Project, project_id)
-        if not project or project.stage == Stage.FAILED:
+        if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
             return
         _set_stage(session, project, Stage.STORYBOARD_GENERATING, "Generating storyboard images…")
         folder = _folder(project)
@@ -490,35 +719,102 @@ def generate_storyboard(project_id: str) -> None:
         try:
             img = get_image_generator()
             for scene in scenes:
-                _generate_scene_image(session, project, scene, folder, img)
+                if _stop_if_canceled(session, project):
+                    return
+                if not _generate_scene_image(session, project, scene, folder, img):
+                    return
         except Exception as exc:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             _fail(session, project, "storyboard generation", exc)
+            return
+        if _stop_if_canceled(session, project):
             return
         _set_stage(session, project, Stage.STORYBOARD_READY, "Storyboard ready for review")
 
 
-def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> None:
+def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> bool:
+    if _stop_if_canceled(session, project):
+        return False
     bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="image")
     scene.status = "generating"
     session.add(scene)
     session.commit()
 
-    refs: list[Path] = []
-    for cid in scene.character_ids:
-        char = session.get(Character, cid)
-        if char and char.reference_image_path:
-            p = Path(settings.projects_dir.parent.parent) / char.reference_image_path
-            if p.exists():
-                refs.append(p)
+    character_refs = _scene_character_refs(session, scene)
+    refs = [ref["path"] for ref in character_refs]
 
     out = folder / "images" / f"scene_{scene.order_index + 1:02d}.png"
-    prompt = _apply_style(scene.image_prompt, _content_style(session, project))
+    ref_label = "style reference image" if getattr(img, "name", "") == "krea" else "reference image"
+    prompt = _apply_character_context(
+        _apply_style(scene.image_prompt, _content_style(session, project)),
+        character_refs,
+        ref_label,
+    )
     result = img.generate(prompt, out, refs or None)
+    if _stop_if_canceled(session, project):
+        return False
     scene.image_path = _rel(result)
     scene.status = "ready"
     session.add(scene)
     session.commit()
     bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+    return True
+
+
+def _scene_character_refs(session, scene: Scene) -> list[dict]:
+    """Character identity refs for prompts, images, and video elements."""
+    root = Path(settings.projects_dir.parent.parent)
+    refs: list[dict] = []
+    for cid in scene.character_ids:
+        char = session.get(Character, cid)
+        if not char or not char.reference_image_path:
+            continue
+        path = root / char.reference_image_path
+        if not path.exists():
+            continue
+        variants = [root / v for v in (char.variant_paths or []) if (root / v).exists()]
+        refs.append({
+            "name": char.name,
+            "description": char.description,
+            "path": path,
+            "variants": variants,
+        })
+    return refs
+
+
+def _apply_character_context(prompt: str, character_refs: list[dict], label: str) -> str:
+    if not character_refs:
+        return prompt
+    lines = []
+    for idx, ref in enumerate(character_refs, start=1):
+        desc = f" - {ref['description']}" if ref.get("description") else ""
+        lines.append(f"{idx}. {ref['name']}{desc}")
+    mapping = "\n".join(lines)
+    return (
+        f"{prompt.strip()}\n\n"
+        f"Character identity map (mandatory): attached {label}s are in this order:\n"
+        f"{mapping}\n"
+        f"Use the named characters exactly as mapped above, keep identities consistent, "
+        f"and do not swap characters when multiple people appear."
+    )
+
+
+def _apply_kling_element_context(prompt: str, element_refs: list[dict]) -> str:
+    if not element_refs:
+        return prompt
+    lines = []
+    for idx, ref in enumerate(element_refs, start=1):
+        desc = f" - {ref['description']}" if ref.get("description") else ""
+        lines.append(f"@Element{idx} = {ref['name']}{desc}")
+    mapping = "\n".join(lines)
+    return (
+        f"{prompt.strip()}\n\n"
+        f"Kling element identity map (mandatory):\n"
+        f"{mapping}\n"
+        f"When describing these characters, reference the exact @Element handles above. "
+        f"Keep each @Element identity consistent and do not swap them."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -527,7 +823,7 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
 def generate_clips(project_id: str) -> None:
     with Session(engine) as session:
         project = session.get(Project, project_id)
-        if not project or project.stage == Stage.FAILED:
+        if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
             return
         _set_stage(session, project, Stage.CLIPS_GENERATING, "Generating motion clips…")
         folder = _folder(project)
@@ -537,29 +833,25 @@ def generate_clips(project_id: str) -> None:
         try:
             vid = get_video_generator()
             for scene in scenes:
+                if _stop_if_canceled(session, project):
+                    return
                 if scene.scene_type != SceneType.VIDEO or not scene.image_path:
                     continue
-                _generate_scene_clip(session, project, scene, folder, vid)
+                if not _generate_scene_clip(session, project, scene, folder, vid):
+                    return
         except Exception as exc:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             _fail(session, project, "clip generation", exc)
+            return
+        if _stop_if_canceled(session, project):
             return
         _set_stage(session, project, Stage.CLIPS_READY, "Clips ready for review")
 
 
 def _scene_elements(session, scene: Scene) -> list[tuple[Path, list[Path]]]:
     """Identity refs for the scene's linked characters: (reference sheet, variants)."""
-    root = Path(settings.projects_dir.parent.parent)
-    elements: list[tuple[Path, list[Path]]] = []
-    for cid in scene.character_ids:
-        char = session.get(Character, cid)
-        if not char or not char.reference_image_path:
-            continue
-        frontal = root / char.reference_image_path
-        if not frontal.exists():
-            continue
-        variants = [root / v for v in (char.variant_paths or []) if (root / v).exists()]
-        elements.append((frontal, variants))
-    return elements
+    return [(ref["path"], ref["variants"]) for ref in _scene_character_refs(session, scene)]
 
 
 def _next_scene_image(session, project, scene: Scene) -> Path | None:
@@ -577,23 +869,35 @@ def _next_scene_image(session, project, scene: Scene) -> Path | None:
     return None
 
 
-def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> None:
+def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> bool:
+    if _stop_if_canceled(session, project):
+        return False
     bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="clip")
     image_abs = Path(settings.projects_dir.parent.parent) / scene.image_path
     out = folder / "clips" / f"scene_{scene.order_index + 1:02d}.mp4"
     duration = scene.duration_seconds or 3.0
+    character_refs = _scene_character_refs(session, scene)
+    element_limit = getattr(vid, "_MAX_ELEMENTS", len(character_refs))
+    element_refs = character_refs[:element_limit]
+    prompt = _apply_kling_element_context(
+        _apply_style(scene.image_prompt, _content_style(session, project)),
+        element_refs,
+    )
     result = vid.generate(
         image_abs,
-        scene.image_prompt,
+        prompt,
         out,
         duration,
-        elements=_scene_elements(session, scene) or None,
+        elements=[(ref["path"], ref["variants"]) for ref in element_refs] or None,
         end_image_path=_next_scene_image(session, project, scene),
     )
+    if _stop_if_canceled(session, project):
+        return False
     scene.clip_path = _rel(result)
     session.add(scene)
     session.commit()
     bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -602,7 +906,7 @@ def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> N
 def render(project_id: str) -> None:
     with Session(engine) as session:
         project = session.get(Project, project_id)
-        if not project or project.stage == Stage.FAILED:
+        if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
             return
         _set_stage(session, project, Stage.RENDERING, "Rendering final video…")
         folder = _folder(project)
@@ -615,6 +919,8 @@ def render(project_id: str) -> None:
             seg_dir = folder / "final" / "segments"
             seg_dir.mkdir(parents=True, exist_ok=True)
             for scene in scenes:
+                if _stop_if_canceled(session, project):
+                    return
                 duration = scene.duration_seconds or 3.0
                 seg = seg_dir / f"seg_{scene.order_index + 1:02d}.mp4"
                 if scene.scene_type == SceneType.VIDEO and scene.clip_path and (root / scene.clip_path).exists():
@@ -626,6 +932,8 @@ def render(project_id: str) -> None:
                 segments.append(seg)
 
             # Merge timestamps into a global timeline & build burned captions.
+            if _stop_if_canceled(session, project):
+                return
             ts_files = [root / s.timestamps_path for s in scenes if s.timestamps_path]
             durations = [s.duration_seconds or 0.0 for s in scenes]
             timeline = ffmpeg.merge_timestamps(ts_files, durations)
@@ -637,10 +945,16 @@ def render(project_id: str) -> None:
 
             out = folder / "final" / f"{slugify(project.title)}.mp4"
             ffmpeg.render_final(segments, narration, captions, out)
+            if _stop_if_canceled(session, project):
+                return
 
             _write_metadata(folder, project)
         except Exception as exc:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             _fail(session, project, "final render", exc)
+            return
+        if _stop_if_canceled(session, project):
             return
         _set_stage(session, project, Stage.DONE, "Done")
 
@@ -675,10 +989,14 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
             return
         folder = _folder(project)
         try:
+            if _stop_if_canceled(session, project):
+                return
             tts = get_tts_generator()
             audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
             ts_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.timestamps.json"
             result = tts.synthesize(scene.narration_text, audio_out, ts_out)
+            if _stop_if_canceled(session, project):
+                return
             scene.audio_path = _rel(audio_out)
             scene.timestamps_path = _rel(ts_out)
             scene.duration_seconds = result.duration_seconds
@@ -687,12 +1005,16 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
             ordered = session.exec(
                 select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
             ).all()
+            if _stop_if_canceled(session, project):
+                return
             ffmpeg.concat_audio(
                 [Path(settings.projects_dir.parent.parent) / s.audio_path for s in ordered if s.audio_path],
                 folder / "audio" / "full_narration.mp3",
             )
             bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
         except Exception:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             traceback.print_exc()
 
 
@@ -706,6 +1028,8 @@ def regenerate_scene_image(project_id: str, scene_id: str) -> None:
         try:
             _generate_scene_image(session, project, scene, folder, get_image_generator())
         except Exception:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             traceback.print_exc()
 
 
@@ -719,6 +1043,8 @@ def regenerate_scene_clip(project_id: str, scene_id: str) -> None:
         try:
             _generate_scene_clip(session, project, scene, folder, get_video_generator())
         except Exception:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
             traceback.print_exc()
 
 

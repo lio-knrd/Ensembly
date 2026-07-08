@@ -126,9 +126,9 @@ class OfflineScriptGenerator(ScriptGenerator):
                 GeneratedScene(
                     narration_text=textwrap.shorten(narration, width=320, placeholder="..."),
                     image_prompt=(
-                        f"Cinematic, dramatic illustration for a short-form video about "
-                        f"{topic}. Scene {i + 1}: {beat} Rich lighting, painterly style, "
-                        f"strong composition, vertical 9:16 framing."
+                        f"Short-form video scene about {topic}. Scene {i + 1}: {beat} "
+                        f"Clear focal subject, dramatic moment, strong composition, "
+                        f"expressive lighting, vertical 9:16 framing."
                     ),
                     scene_type=scene_type,
                     # Spread the guessed cast across scenes so the character-sheet
