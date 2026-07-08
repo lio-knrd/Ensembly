@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
 import { COLUMNS, columnForStage, isGenerating, stageLabel } from "../stages.js";
+import Modal from "../components/Modal.jsx";
 import StatusPill from "../components/StatusPill.jsx";
 
 export default function ProjectDetail() {
@@ -66,6 +67,7 @@ export default function ProjectDetail() {
 
       <StageProgress stage={project.stage} />
       <StageBar project={project} scenes={scenes} />
+      {showSoundtrack(project.stage) && <SoundtrackPanel projectId={id} />}
 
       {project.error && <div className="banner">Error — {project.error}</div>}
 
@@ -88,6 +90,10 @@ export default function ProjectDetail() {
       </div>
     </>
   );
+}
+
+function showSoundtrack(stage) {
+  return !["IDEA", "SCRIPT_GENERATING"].includes(stage);
 }
 
 function StageProgress({ stage }) {
@@ -368,6 +374,192 @@ function CastCard({ projectId, member, onDone, busy }) {
       </div>
     </div>
   );
+}
+
+function SoundtrackPanel({ projectId }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const { data, isLoading } = useQuery({
+    queryKey: ["project-music", projectId],
+    queryFn: () => api.getProjectMusic(projectId),
+  });
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["project-music", projectId] });
+    qc.invalidateQueries({ queryKey: ["project", projectId] });
+  };
+  const update = useMutation({
+    mutationFn: (body) => api.updateProjectMusic(projectId, body),
+    onSuccess: invalidate,
+  });
+  const clear = useMutation({
+    mutationFn: () => api.clearProjectMusic(projectId),
+    onSuccess: invalidate,
+  });
+
+  const track = data?.track;
+  const volume = data?.volume ?? 0.075;
+  const enabled = data?.enabled ?? true;
+
+  return (
+    <div className="panel soundtrack-panel">
+      <div className="soundtrack-head">
+        <div>
+          <h2>Soundtrack</h2>
+          <div className="panel-sub">
+            {track ? `${track.title} - ${track.artist_name || "Jamendo artist"}` : "No track selected"}
+          </div>
+        </div>
+        <div className="row">
+          <button className="btn" onClick={() => setOpen(true)}>
+            {track ? "Change track" : "Choose track"}
+          </button>
+          {track && (
+            <button className="btn ghost" disabled={clear.isPending} onClick={() => clear.mutate()}>
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+      {isLoading ? (
+        <div className="muted">Loading...</div>
+      ) : track ? (
+        <div className="soundtrack-current">
+          {track.image_url && <img src={track.image_url} alt="" />}
+          <div className="soundtrack-meta">
+            <div className="row soundtrack-title-row">
+              <strong>{track.title}</strong>
+              <span className="tag">{licenseName(track.license_url)}</span>
+              {track.downloaded && <span className="tag">downloaded</span>}
+            </div>
+            <div className="muted">
+              {track.artist_name} {track.duration_seconds ? `- ${formatDuration(track.duration_seconds)}` : ""}
+            </div>
+            {track.audio_url && <audio src={track.audio_url} controls preload="metadata" />}
+          </div>
+          <label className="check-row soundtrack-enabled">
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={update.isPending}
+              onChange={(e) => update.mutate({ enabled: e.target.checked })}
+            />
+            Use in render
+          </label>
+          <div className="soundtrack-volume">
+            <label>Volume</label>
+            <input
+              type="range"
+              min="0"
+              max="0.3"
+              step="0.005"
+              value={volume}
+              disabled={update.isPending}
+              onChange={(e) => update.mutate({ volume: Number(e.target.value) })}
+            />
+            <span>{Math.round(volume * 100)}%</span>
+          </div>
+        </div>
+      ) : (
+        <div className="soundtrack-empty">
+          <button className="btn primary" onClick={() => setOpen(true)}>
+            Search Jamendo
+          </button>
+        </div>
+      )}
+      {open && <MusicSearchModal projectId={projectId} onClose={() => setOpen(false)} onSelected={invalidate} />}
+    </div>
+  );
+}
+
+function MusicSearchModal({ projectId, onClose, onSelected }) {
+  const [query, setQuery] = useState("mythic ambient");
+  const [submitted, setSubmitted] = useState("mythic ambient");
+  const [instrumental, setInstrumental] = useState(true);
+  const { data, isFetching, error } = useQuery({
+    queryKey: ["music-search", submitted, instrumental],
+    queryFn: () => api.searchMusic(submitted, { instrumental, limit: 20 }),
+    enabled: Boolean(submitted),
+  });
+  const select = useMutation({
+    mutationFn: (track) => api.selectProjectMusic(projectId, track),
+    onSuccess: () => {
+      onSelected();
+      onClose();
+    },
+  });
+  const results = data?.results || [];
+
+  return (
+    <Modal title="Jamendo music" onClose={onClose}>
+      <form
+        className="music-search-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setSubmitted(query.trim() || "ambient");
+        }}
+      >
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="mythic, calm, epic..." />
+        <button className="btn primary" type="submit">
+          Search
+        </button>
+      </form>
+      <label className="check-row music-filter">
+        <input
+          type="checkbox"
+          checked={instrumental}
+          onChange={(e) => setInstrumental(e.target.checked)}
+        />
+        Instrumental
+      </label>
+      {data && data.configured === false && <div className="banner compact">{data.message}</div>}
+      {error && <div className="banner compact">{error.message}</div>}
+      {select.error && <div className="banner compact">{select.error.message}</div>}
+      {isFetching ? (
+        <div className="empty">Searching...</div>
+      ) : (
+        <div className="music-results">
+          {results.map((track) => (
+            <div className="music-result" key={track.provider_track_id}>
+              {track.image_url && <img src={track.image_url} alt="" />}
+              <div className="music-result-main">
+                <div className="row soundtrack-title-row">
+                  <strong>{track.title}</strong>
+                  <span className="tag">{licenseName(track.license_url)}</span>
+                </div>
+                <div className="muted">
+                  {track.artist_name} {track.duration_seconds ? `- ${formatDuration(track.duration_seconds)}` : ""}
+                </div>
+                {track.audio_url && <audio src={track.audio_url} controls preload="none" />}
+              </div>
+              <button
+                className="btn sm"
+                disabled={!track.download_allowed || select.isPending}
+                onClick={() => select.mutate(track)}
+                title={track.download_allowed ? "Use track" : "Download not allowed by Jamendo"}
+              >
+                Use
+              </button>
+            </div>
+          ))}
+          {!results.length && data?.configured !== false && <div className="empty">No tracks found</div>}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function formatDuration(seconds) {
+  const mins = Math.floor((seconds || 0) / 60);
+  const secs = Math.floor((seconds || 0) % 60);
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+function licenseName(url) {
+  const value = (url || "").toLowerCase();
+  if (value.includes("zero")) return "CC0";
+  if (value.includes("by-sa")) return "CC BY-SA";
+  if (value.includes("by/")) return "CC BY";
+  return "CC";
 }
 
 function FinalPanel({ project, metadata }) {

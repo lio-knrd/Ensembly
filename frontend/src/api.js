@@ -49,6 +49,20 @@ export const api = {
     req(`/api/projects/${id}/retry-failed-step`, { method: "POST" }),
   cancelProject: (id) => req(`/api/projects/${id}/cancel`, { method: "POST" }),
   rerender: (id) => req(`/api/projects/${id}/render`, { method: "POST" }),
+  getProjectMusic: (id) => req(`/api/projects/${id}/music`),
+  updateProjectMusic: (id, body) =>
+    req(`/api/projects/${id}/music`, { method: "PATCH", body: JSON.stringify(body) }),
+  selectProjectMusic: (id, body) =>
+    req(`/api/projects/${id}/music/select`, { method: "POST", body: JSON.stringify(body) }),
+  clearProjectMusic: (id) => req(`/api/projects/${id}/music`, { method: "DELETE" }),
+  searchMusic: (query, options = {}) => {
+    const params = new URLSearchParams({
+      q: query || "ambient",
+      limit: String(options.limit || 20),
+      instrumental: String(options.instrumental ?? true),
+    });
+    return req(`/api/music/search?${params.toString()}`);
+  },
 
   // Scenes
   updateScene: (pid, sid, body) =>

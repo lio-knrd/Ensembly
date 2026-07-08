@@ -60,6 +60,9 @@ class Project(SQLModel, table=True):
     platform_preset_id: Optional[str] = Field(default=None, foreign_key="platform_presets.id")
     content_preset_id: Optional[str] = Field(default=None, foreign_key="content_presets.id")
     target_duration_seconds: int = 75
+    music_track_id: Optional[str] = Field(default=None, foreign_key="music_tracks.id")
+    music_enabled: bool = True
+    music_volume: float = 0.075
     stage: Stage = Field(default=Stage.IDEA)
     folder_path: Optional[str] = None
     # Free-form status text surfaced during long-running generation, plus any error.
@@ -139,6 +142,26 @@ class ContentPreset(SQLModel, table=True):
     image_style_prompt: str = ""
     voice_id: str = ""
     is_default: bool = False
+
+
+class MusicTrack(SQLModel, table=True):
+    __tablename__ = "music_tracks"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    provider: str = "jamendo"
+    provider_track_id: str = Field(index=True)
+    title: str
+    artist_name: str = ""
+    album_name: str = ""
+    duration_seconds: int = 0
+    license_url: str = ""
+    audio_url: str = ""
+    download_url: str = ""
+    download_allowed: bool = False
+    image_url: str = ""
+    share_url: str = ""
+    local_path: Optional[str] = None
+    created_at: datetime = Field(default_factory=_now)
 
 
 class Setting(SQLModel, table=True):

@@ -25,6 +25,25 @@ class ProjectDetail(BaseModel):
     characters: list[dict]
 
 
+class ProjectMusicUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    volume: Optional[float] = None
+
+
+class MusicTrackSelect(BaseModel):
+    provider_track_id: str
+    title: str
+    artist_name: str = ""
+    album_name: str = ""
+    duration_seconds: int = 0
+    license_url: str = ""
+    audio_url: str = ""
+    download_url: str = ""
+    download_allowed: bool = False
+    image_url: str = ""
+    share_url: str = ""
+
+
 # --- Scenes ---
 class SceneUpdate(BaseModel):
     narration_text: Optional[str] = None

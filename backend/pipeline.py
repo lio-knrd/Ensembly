@@ -29,6 +29,7 @@ from .events import bus
 from .models import (
     Character,
     ContentPreset,
+    MusicTrack,
     PlatformPreset,
     Project,
     ProjectCharacter,
@@ -37,6 +38,7 @@ from .models import (
     Stage,
 )
 from .services import ffmpeg
+from .services.jamendo import ensure_downloaded, local_track_path
 from .storage import project_folder
 
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -144,6 +146,17 @@ def _stop_if_canceled(session: Session, project: Project) -> bool:
 
 def _folder(project: Project) -> Path:
     return Path(settings.projects_dir.parent.parent) / project.folder_path if project.folder_path else project_folder(project.title)
+
+
+def _asset_path(path: str | None) -> Path | None:
+    if not path:
+        return None
+    return Path(settings.projects_dir.parent.parent) / path
+
+
+def _asset_exists(path: str | None) -> bool:
+    resolved = _asset_path(path)
+    return bool(resolved and resolved.exists())
 
 
 def _content_style(session: Session, project: Project) -> str:
@@ -467,16 +480,19 @@ def _interrupted_stage(project: Project) -> Stage | None:
 
 
 def _audio_ready(scenes: list[Scene]) -> bool:
-    return bool(scenes) and all(scene.audio_path for scene in scenes)
+    return bool(scenes) and all(
+        _asset_exists(scene.audio_path) and _asset_exists(scene.timestamps_path)
+        for scene in scenes
+    )
 
 
 def _storyboard_ready(scenes: list[Scene]) -> bool:
-    return bool(scenes) and all(scene.image_path for scene in scenes)
+    return bool(scenes) and all(_asset_exists(scene.image_path) for scene in scenes)
 
 
 def _clips_ready(scenes: list[Scene]) -> bool:
     video_scenes = [scene for scene in scenes if scene.scene_type == SceneType.VIDEO]
-    return bool(scenes) and all(scene.clip_path for scene in video_scenes)
+    return bool(scenes) and all(_asset_exists(scene.clip_path) for scene in video_scenes)
 
 
 def _final_ready(project: Project) -> bool:
@@ -691,6 +707,13 @@ def generate_audio(project_id: str) -> None:
             for scene in scenes:
                 if _stop_if_canceled(session, project):
                     return
+                if _asset_exists(scene.audio_path) and _asset_exists(scene.timestamps_path):
+                    if scene.status != "ready":
+                        scene.status = "ready"
+                        session.add(scene)
+                        session.commit()
+                        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+                    continue
                 scene.status = "generating"
                 session.add(scene)
                 session.commit()
@@ -739,6 +762,13 @@ def generate_storyboard(project_id: str) -> None:
             for scene in scenes:
                 if _stop_if_canceled(session, project):
                     return
+                if _asset_exists(scene.image_path):
+                    if scene.status != "ready":
+                        scene.status = "ready"
+                        session.add(scene)
+                        session.commit()
+                        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+                    continue
                 if not _generate_scene_image(session, project, scene, folder, img):
                     return
         except Exception as exc:  # noqa: BLE001
@@ -983,6 +1013,13 @@ def generate_clips(project_id: str) -> None:
                     return
                 if scene.scene_type != SceneType.VIDEO or not scene.image_path:
                     continue
+                if _asset_exists(scene.clip_path):
+                    if scene.status != "ready":
+                        scene.status = "ready"
+                        session.add(scene)
+                        session.commit()
+                        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+                    continue
                 if not _generate_scene_clip(session, project, scene, folder, vid):
                     return
         except Exception as exc:  # noqa: BLE001
@@ -1089,10 +1126,19 @@ def render(project_id: str) -> None:
             captions = ffmpeg.build_ass_captions(timeline, folder / "final" / "captions.ass")
 
             narration = folder / "audio" / "full_narration.mp3"
+            music_path = None
+            if project.music_enabled and project.music_track_id:
+                music_track = session.get(MusicTrack, project.music_track_id)
+                music_path = local_track_path(music_track)
+                if music_track and music_path is None:
+                    music_path = ensure_downloaded(project, music_track)
+                    session.add(music_track)
+                    session.add(project)
+                    session.commit()
             from .storage import slugify
 
             out = folder / "final" / f"{slugify(project.title)}.mp4"
-            ffmpeg.render_final(segments, narration, captions, out)
+            ffmpeg.render_final(segments, narration, captions, out, music_path, project.music_volume)
             if _stop_if_canceled(session, project):
                 return
 

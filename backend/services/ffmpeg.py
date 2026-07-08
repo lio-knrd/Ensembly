@@ -16,6 +16,12 @@ import tempfile
 from pathlib import Path
 
 W, H, FPS = 1080, 1920, 30
+VOICE_FADE_IN_SECONDS = 1.8
+VOICE_FADE_OUT_SECONDS = 2.4
+MUSIC_FADE_IN_SECONDS = 4.5
+MUSIC_FADE_OUT_SECONDS = 5.0
+MUSIC_VOLUME = 0.075
+FADE_CURVE = "qsin"
 
 
 class FFmpegNotAvailable(RuntimeError):
@@ -51,6 +57,17 @@ def _probe_duration(path: Path) -> float:
         return float(proc.stdout.decode().strip())
     except ValueError:
         return 0.0
+
+
+def _fade_bounds(duration: float, fade_in: float, fade_out: float) -> tuple[float, float, float]:
+    """Clamp fade durations so short videos do not produce invalid filters."""
+    duration = max(0.0, duration)
+    if duration <= 0:
+        return 0.0, 0.0, 0.0
+    fade_in = min(max(0.0, fade_in), duration / 2)
+    fade_out = min(max(0.0, fade_out), max(0.0, duration - fade_in))
+    fade_out_start = max(0.0, duration - fade_out)
+    return fade_in, fade_out_start, fade_out
 
 
 # --------------------------------------------------------------------------- #
@@ -237,6 +254,8 @@ def render_final(
     narration_mp3: Path,
     captions_ass: Path | None,
     out_path: Path,
+    music_path: Path | None = None,
+    music_volume: float = MUSIC_VOLUME,
 ) -> Path:
     """Concat visual segments, mux narration, burn captions."""
     if not segments:
@@ -256,18 +275,68 @@ def render_final(
             "-r", str(FPS), str(silent_video),
         ])
 
+        video_duration = _probe_duration(silent_video)
+        if video_duration <= 0:
+            video_duration = sum(max(0.0, _probe_duration(s)) for s in segments)
+
+        has_music = music_path and Path(music_path).exists() and Path(music_path).stat().st_size > 0
+
         args = ["ffmpeg", "-y", "-i", str(silent_video)]
         has_audio = narration_mp3 and Path(narration_mp3).exists() and Path(narration_mp3).stat().st_size > 0
         if has_audio:
             args += ["-i", str(narration_mp3)]
+        if has_music:
+            args += ["-stream_loop", "-1", "-i", str(music_path)]
 
         if captions_ass and Path(captions_ass).exists():
             escaped = str(captions_ass).replace("\\", "/").replace(":", "\\:")
             args += ["-vf", f"ass='{escaped}'"]
 
-        args += ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"]
+        filters: list[str] = []
+        audio_labels: list[str] = []
         if has_audio:
-            args += ["-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+            voice_fade_in, voice_fade_out_start, voice_fade_out = _fade_bounds(
+                video_duration,
+                VOICE_FADE_IN_SECONDS,
+                VOICE_FADE_OUT_SECONDS,
+            )
+            filters.append(
+                "[1:a]aresample=44100,"
+                f"afade=t=in:st=0:d={voice_fade_in:.3f}:curve={FADE_CURVE},"
+                f"afade=t=out:st={voice_fade_out_start:.3f}:d={voice_fade_out:.3f}:curve={FADE_CURVE}"
+                "[narr]"
+            )
+            audio_labels.append("[narr]")
+        if has_music:
+            music_input = 2 if has_audio else 1
+            music_fade_in, music_fade_out_start, music_fade_out = _fade_bounds(
+                video_duration,
+                MUSIC_FADE_IN_SECONDS,
+                MUSIC_FADE_OUT_SECONDS,
+            )
+            filters.append(
+                f"[{music_input}:a]aresample=44100,"
+                f"atrim=0:{video_duration:.3f},asetpts=PTS-STARTPTS,"
+                f"volume={max(0.0, min(music_volume, 0.3)):.3f},"
+                f"afade=t=in:st=0:d={music_fade_in:.3f}:curve={FADE_CURVE},"
+                f"afade=t=out:st={music_fade_out_start:.3f}:d={music_fade_out:.3f}:curve={FADE_CURVE}"
+                "[music]"
+            )
+            audio_labels.append("[music]")
+
+        if len(audio_labels) > 1:
+            filters.append(
+                "".join(audio_labels)
+                + f"amix=inputs={len(audio_labels)}:duration=first:dropout_transition=0:normalize=0[aout]"
+            )
+        elif len(audio_labels) == 1:
+            filters.append(f"{audio_labels[0]}anull[aout]")
+
+        if filters:
+            args += ["-filter_complex", ";".join(filters)]
+        args += ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"]
+        if filters:
+            args += ["-c:a", "aac", "-map", "0:v:0", "-map", "[aout]", "-shortest"]
         args += [str(out_path)]
         _run(args)
     return out_path

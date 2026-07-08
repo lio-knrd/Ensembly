@@ -32,6 +32,12 @@ class Settings(BaseModel):
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "").strip()
     fal_api_key: str = os.getenv("FAL_API_KEY", "").strip()
+    jamendo_client_id: str = (
+        os.getenv("JAMENDO_CLIENT_ID")
+        or os.getenv("JAMEDO_CLIENT_ID")
+        or ""
+    ).strip()
+    jamendo_secret: str = (os.getenv("JAMENDO_SECRET") or os.getenv("JAMEDO_SECRET") or "").strip()
 
     default_llm_provider: str = os.getenv("DEFAULT_LLM_PROVIDER", "anthropic").strip().lower()
 
@@ -80,6 +86,7 @@ class Settings(BaseModel):
             "openai": bool(self.openai_api_key),
             "elevenlabs": bool(self.elevenlabs_api_key),
             "fal": bool(self.fal_api_key),
+            "jamendo": bool(self.jamendo_client_id),
         }
 
 
