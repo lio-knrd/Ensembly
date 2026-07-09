@@ -79,7 +79,6 @@ def convert_idea(idea_id: str, body: IdeaConvert, session: Session = Depends(get
     else:
         platform = default_platform_preset(session)
         content = default_content_preset(session)
-    platform, content = _effective_presets(session, plan)
     project = Project(
         title=(body.title or idea.text).strip()[:120],
         topic_prompt=idea.text,
@@ -390,6 +389,7 @@ def convert_item(
 ):
     plan = _plan(session, plan_id)
     item = _item(session, plan_id, item_id)
+    platform, content = _effective_presets(session, plan)
     if item.project_id:
         raise HTTPException(400, "This work already has a MythForge project")
     existing_titles = set(session.exec(select(Project.title)).all())
