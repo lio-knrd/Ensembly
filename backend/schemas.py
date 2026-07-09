@@ -18,6 +18,19 @@ class ProjectCreate(BaseModel):
     start: bool = True  # kick off script generation immediately
 
 
+class ProjectScopeAnalyze(BaseModel):
+    title: str = ""
+    topic_prompt: str
+    target_duration_seconds: Optional[int] = None
+    platform_preset_id: Optional[str] = None
+    content_preset_id: Optional[str] = None
+
+
+class ProjectSplitCreate(ProjectScopeAnalyze):
+    analysis: dict
+    start: bool = True
+
+
 class ProjectDetail(BaseModel):
     project: dict
     scenes: list[dict]

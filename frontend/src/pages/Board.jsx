@@ -106,6 +106,7 @@ function NewProjectModal({ onClose }) {
   const [title, setTitle] = useState("");
   const [topic, setTopic] = useState("");
   const [duration, setDuration] = useState(75);
+  const [splitPlan, setSplitPlan] = useState(null);
 
   const { data: platforms = [] } = useQuery({
     queryKey: ["platformPresets"],
@@ -118,21 +119,76 @@ function NewProjectModal({ onClose }) {
   const [platformId, setPlatformId] = useState("");
   const [contentId, setContentId] = useState("");
 
+  const projectInput = () => ({
+    title,
+    topic_prompt: topic,
+    target_duration_seconds: Number(duration),
+    platform_preset_id: platformId || null,
+    content_preset_id: contentId || null,
+  });
+  const finish = (project) => {
+    qc.invalidateQueries({ queryKey: ["projects"] });
+    onClose();
+    navigate(`/project/${project.id}`);
+  };
   const create = useMutation({
-    mutationFn: () =>
+    mutationFn: (resolvedTitle) =>
       api.createProject({
-        title: title || topic,
-        topic_prompt: topic,
-        target_duration_seconds: Number(duration),
-        platform_preset_id: platformId || null,
-        content_preset_id: contentId || null,
+        ...projectInput(),
+        title: resolvedTitle || title || topic,
       }),
-    onSuccess: (p) => {
-      qc.invalidateQueries({ queryKey: ["projects"] });
-      onClose();
-      navigate(`/project/${p.id}`);
+    onSuccess: finish,
+  });
+  const analyze = useMutation({
+    mutationFn: () => api.analyzeProjectScope(projectInput()),
+    onSuccess: (plan) => {
+      if (plan.split_recommended) {
+        setSplitPlan(plan);
+      } else {
+        create.mutate(title || plan.suggested_title || topic);
+      }
     },
   });
+  const createSplit = useMutation({
+    mutationFn: () => api.createSplitProjects({ ...projectInput(), analysis: splitPlan }),
+    onSuccess: ({ projects }) => finish(projects[0]),
+  });
+
+  if (splitPlan) {
+    const splitError = create.error || createSplit.error;
+    return (
+      <Modal title="Make this a two-part series?" onClose={onClose}>
+        <p>{splitPlan.reason}</p>
+        <div className="split-preview">
+          <div>
+            <strong>Part 1</strong>
+            <span>{splitPlan.part_1.focus}</span>
+          </div>
+          <div>
+            <strong>Part 2</strong>
+            <span>{splitPlan.part_2.focus}</span>
+          </div>
+        </div>
+        {splitError && <div className="banner">{String(splitError.message)}</div>}
+        <div className="modal-actions">
+          <button
+            className="btn ghost"
+            disabled={create.isPending || createSplit.isPending}
+            onClick={() => create.mutate(title || splitPlan.suggested_title || topic)}
+          >
+            No, keep one video
+          </button>
+          <button
+            className="btn primary"
+            disabled={create.isPending || createSplit.isPending}
+            onClick={() => createSplit.mutate()}
+          >
+            {createSplit.isPending ? "Creating both…" : "Yes, create both parts"}
+          </button>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal title="New project" onClose={onClose}>
@@ -148,7 +204,7 @@ function NewProjectModal({ onClose }) {
       <div className="field">
         <label>Working title (optional)</label>
         <input
-          placeholder="Defaults to the topic"
+          placeholder="AI suggests one if left blank"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
@@ -191,17 +247,23 @@ function NewProjectModal({ onClose }) {
           </select>
         </div>
       </div>
-      {create.isError && <div className="banner">{String(create.error.message)}</div>}
+      {(analyze.isError || create.isError) && (
+        <div className="banner">{String((analyze.error || create.error).message)}</div>
+      )}
       <div className="modal-actions">
         <button className="btn ghost" onClick={onClose}>
           Cancel
         </button>
         <button
           className="btn primary"
-          disabled={!topic.trim() || create.isPending}
-          onClick={() => create.mutate()}
+          disabled={!topic.trim() || analyze.isPending || create.isPending}
+          onClick={() => analyze.mutate()}
         >
-          {create.isPending ? "Creating…" : "Create & generate script"}
+          {analyze.isPending
+            ? "Checking scope…"
+            : create.isPending
+              ? "Creating…"
+              : "Create & generate script"}
         </button>
       </div>
     </Modal>

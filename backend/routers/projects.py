@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from ..adapters.llm import analyze_project_scope
 from ..adapters.registry import tts_voice_label
 from .. import pipeline
 from ..config import settings
@@ -16,6 +17,8 @@ from ..schemas import (
     CastSheetGenerate,
     ProjectCreate,
     ProjectDetail,
+    ProjectScopeAnalyze,
+    ProjectSplitCreate,
     SceneAssetSelect,
     SceneUpdate,
 )
@@ -28,6 +31,61 @@ from .common import (
 )
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+def _unique_title(session: Session, requested: str) -> str:
+    base = (requested.strip() or "Untitled")[:120]
+    existing = set(session.exec(select(Project.title)).all())
+    if base not in existing:
+        return base
+    number = 2
+    while True:
+        suffix = f" ({number})"
+        candidate = f"{base[:120 - len(suffix)].rstrip()}{suffix}"
+        if candidate not in existing:
+            return candidate
+        number += 1
+
+
+def _unique_series_titles(session: Session, requested: str) -> tuple[str, str]:
+    """Reserve a readable pair without asking the LLM about existing projects."""
+    base = (requested.strip() or "Untitled")[:108]
+    existing = set(session.exec(select(Project.title)).all())
+    series_number = 1
+    while True:
+        series_base = base if series_number == 1 else f"{base[:97].rstrip()} — Series {series_number}"
+        titles = (f"{series_base} (1)", f"{series_base} (2)")
+        if not any(title in existing for title in titles):
+            return titles
+        series_number += 1
+
+
+def _presets_for_request(session: Session, platform_id: str | None, content_id: str | None):
+    platform = session.get(PlatformPreset, platform_id) if platform_id else default_platform_preset(session)
+    content = session.get(ContentPreset, content_id) if content_id else default_content_preset(session)
+    return platform, content
+
+
+def _new_project(
+    session: Session,
+    *,
+    title: str,
+    topic_prompt: str,
+    duration: int,
+    platform_id: str | None,
+    content_id: str | None,
+) -> Project:
+    project = Project(
+        title=_unique_title(session, title),
+        topic_prompt=topic_prompt.strip(),
+        target_duration_seconds=duration,
+        platform_preset_id=platform_id,
+        content_preset_id=content_id,
+        stage=Stage.IDEA,
+    )
+    session.add(project)
+    session.flush()
+    return project
 
 
 @router.get("")
@@ -45,25 +103,97 @@ def list_projects(session: Session = Depends(get_session)):
 
 @router.post("", status_code=201)
 def create_project(body: ProjectCreate, session: Session = Depends(get_session)):
-    platform = default_platform_preset(session)
-    content = default_content_preset(session)
+    platform, content = _presets_for_request(session, body.platform_preset_id, body.content_preset_id)
     duration = body.target_duration_seconds or get_setting(session, "default_duration_seconds", 75)
 
-    project = Project(
-        title=body.title.strip() or "Untitled",
+    project = _new_project(
+        session,
+        title=body.title,
         topic_prompt=body.topic_prompt.strip(),
-        target_duration_seconds=int(duration),
-        platform_preset_id=body.platform_preset_id or (platform.id if platform else None),
-        content_preset_id=body.content_preset_id or (content.id if content else None),
-        stage=Stage.IDEA,
+        duration=int(duration),
+        platform_id=platform.id if platform else None,
+        content_id=content.id if content else None,
     )
-    session.add(project)
     session.commit()
     session.refresh(project)
 
     if body.start:
         pipeline.submit(pipeline.generate_script, project.id)
     return project.model_dump()
+
+
+@router.post("/analyze-scope")
+def analyze_scope(body: ProjectScopeAnalyze, session: Session = Depends(get_session)):
+    duration = int(body.target_duration_seconds or get_setting(session, "default_duration_seconds", 75))
+    platform, content = _presets_for_request(session, body.platform_preset_id, body.content_preset_id)
+    return analyze_project_scope(
+        body.topic_prompt,
+        body.title,
+        duration,
+        platform.format_prompt if platform else "",
+        content.content_prompt if content else "",
+    )
+
+
+@router.post("/split", status_code=201)
+def create_split_projects(body: ProjectSplitCreate, session: Session = Depends(get_session)):
+    analysis = body.analysis
+    if not analysis.get("split_recommended"):
+        raise HTTPException(400, "The supplied analysis does not recommend a split")
+    duration = int(body.target_duration_seconds or get_setting(session, "default_duration_seconds", 75))
+    platform, content = _presets_for_request(session, body.platform_preset_id, body.content_preset_id)
+    base_title = (body.title.strip() or str(analysis.get("suggested_title", "")).strip() or body.topic_prompt)[:108]
+    throughline = str(analysis.get("series_throughline", "")).strip()
+    part_1 = analysis.get("part_1") or {}
+    part_2 = analysis.get("part_2") or {}
+    part_titles = _unique_series_titles(session, base_title)
+    shared = (
+        f"Original topic: {body.topic_prompt.strip()}\n"
+        f"Series throughline: {throughline}\n"
+        f"This is a two-part series. Each part has about {duration} seconds."
+    )
+    prompt_1 = (
+        f"{shared}\n\nPART 1 OF 2\n"
+        f"Cover: {str(part_1.get('focus', '')).strip()}\n"
+        f"Hard ending boundary: {str(part_1.get('ending_boundary', '')).strip()}\n"
+        f"Reserved for Part 2: {str(part_2.get('focus', '')).strip()}\n"
+        "Make this part satisfying on its own. End at the stated natural hinge. "
+        "Do not explain events, conclusions, or consequences reserved for Part 2."
+    )
+    prompt_2 = (
+        f"{shared}\n\nPART 2 OF 2\n"
+        f"Already covered in Part 1: {str(part_1.get('focus', '')).strip()}\n"
+        f"Part 1 ended at this boundary: {str(part_1.get('ending_boundary', '')).strip()}\n"
+        f"Begin with: {str(part_2.get('opening_bridge', '')).strip()}\n"
+        f"Cover: {str(part_2.get('focus', '')).strip()}\n"
+        "Continue from the hinge and complete the remaining arc. Use at most one "
+        "short bridging sentence; do not summarize or retell Part 1."
+    )
+    projects = [
+        _new_project(
+            session,
+            title=part_titles[0],
+            topic_prompt=prompt_1,
+            duration=duration,
+            platform_id=platform.id if platform else None,
+            content_id=content.id if content else None,
+        ),
+        _new_project(
+            session,
+            title=part_titles[1],
+            topic_prompt=prompt_2,
+            duration=duration,
+            platform_id=platform.id if platform else None,
+            content_id=content.id if content else None,
+        ),
+    ]
+    session.commit()
+    for project in projects:
+        session.refresh(project)
+    if body.start:
+        for project in projects:
+            pipeline.submit(pipeline.generate_script, project.id)
+    return {"projects": [project.model_dump() for project in projects]}
 
 
 @router.get("/{project_id}", response_model=ProjectDetail)

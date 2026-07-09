@@ -30,6 +30,10 @@ export const api = {
   listProjects: () => req("/api/projects"),
   createProject: (body) =>
     req("/api/projects", { method: "POST", body: JSON.stringify(body) }),
+  analyzeProjectScope: (body) =>
+    req("/api/projects/analyze-scope", { method: "POST", body: JSON.stringify(body) }),
+  createSplitProjects: (body) =>
+    req("/api/projects/split", { method: "POST", body: JSON.stringify(body) }),
   getProject: (id) => req(`/api/projects/${id}`),
   deleteProject: (id) => req(`/api/projects/${id}`, { method: "DELETE" }),
   regenScript: (id) => req(`/api/projects/${id}/generate-script`, { method: "POST" }),

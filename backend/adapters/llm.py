@@ -208,6 +208,137 @@ def _guess_character_names(topic: str) -> list[str]:
     return names[:4]
 
 
+SCOPE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "split_recommended": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "suggested_title": {"type": "string"},
+        "series_throughline": {"type": "string"},
+        "part_1": {
+            "type": "object",
+            "properties": {
+                "focus": {"type": "string"},
+                "ending_boundary": {"type": "string"},
+            },
+            "required": ["focus", "ending_boundary"],
+            "additionalProperties": False,
+        },
+        "part_2": {
+            "type": "object",
+            "properties": {
+                "focus": {"type": "string"},
+                "opening_bridge": {"type": "string"},
+            },
+            "required": ["focus", "opening_bridge"],
+            "additionalProperties": False,
+        },
+    },
+    "required": [
+        "split_recommended", "reason", "suggested_title", "series_throughline",
+        "part_1", "part_2",
+    ],
+    "additionalProperties": False,
+}
+
+
+def analyze_project_scope(
+    topic: str,
+    title: str,
+    target_duration_seconds: int,
+    platform_prompt: str = "",
+    content_prompt: str = "",
+) -> dict:
+    """Decide whether one focused video can cover the topic without rushing."""
+    instruction = f"""\
+Assess whether this topic can become one coherent narrated short-form video of
+about {target_duration_seconds} seconds (roughly {round(target_duration_seconds * 2.5)} spoken words).
+
+Recommend two parts ONLY when a single video would have to omit essential causal
+steps, compress distinct major arcs into a list, or become confusing. Do not
+split merely because the wider subject has more detail available: a focused,
+complete angle is preferable when it preserves the user's core intent.
+
+If a split is recommended, design exactly two complementary parts. Choose a
+natural narrative or explanatory hinge: Part 1 must feel satisfying while ending
+at that hinge; Part 2 must start just after it, use at most one brief bridging
+sentence, and never retell Part 1. Together they must cover the essential arc
+without gaps, premature cutoff, padding, or duplicated explanation.
+
+Always suggest a concise project/series title, even if no title was supplied.
+Do not inspect or account for existing project titles; uniqueness is handled by
+the application.
+
+Supplied title: {title.strip() or "(none)"}
+Topic / idea: {topic.strip()}
+Platform guidance: {platform_prompt.strip() or "(none)"}
+Content guidance: {content_prompt.strip() or "(none)"}
+
+Return only the structured assessment."""
+    try:
+        if settings.anthropic_api_key and settings.default_llm_provider != "openai":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            response = client.messages.create(
+                model=settings.anthropic_script_model,
+                max_tokens=1400,
+                messages=[{"role": "user", "content": instruction}],
+                output_config={"format": {"type": "json_schema", "schema": SCOPE_ANALYSIS_SCHEMA}},
+            )
+            text = next((b.text for b in response.content if b.type == "text"), "")
+            return _extract_json(text)
+        if settings.openai_api_key:
+            response = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.openai_script_model,
+                    "messages": [{"role": "user", "content": instruction}],
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "project_scope",
+                            "schema": SCOPE_ANALYSIS_SCHEMA,
+                            "strict": True,
+                        },
+                    },
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            return _extract_json(response.json()["choices"][0]["message"]["content"])
+    except Exception:  # noqa: BLE001 - creation can still proceed with a safe fallback
+        pass
+    return _offline_scope_analysis(topic, title, target_duration_seconds)
+
+
+def _offline_scope_analysis(topic: str, title: str, target_duration_seconds: int) -> dict:
+    words = topic.split()
+    arc_markers = len(re.findall(r"[;,]|\b(?:then|after|before|rise|fall|and finally)\b", topic, re.I))
+    split = len(words) > max(45, int(target_duration_seconds * 0.55)) and arc_markers >= 2
+    base_title = title.strip() or textwrap.shorten(topic.strip(), width=72, placeholder="…") or "Untitled"
+    midpoint = max(1, len(words) // 2)
+    return {
+        "split_recommended": split,
+        "reason": (
+            "The topic contains multiple major steps that would be rushed at the selected duration."
+            if split else
+            "The topic can be shaped into one focused video at the selected duration."
+        ),
+        "suggested_title": base_title,
+        "series_throughline": topic.strip(),
+        "part_1": {
+            "focus": " ".join(words[:midpoint]) if split else topic.strip(),
+            "ending_boundary": "End at the central turning point; do not begin the later consequences.",
+        },
+        "part_2": {
+            "focus": " ".join(words[midpoint:]) if split else "",
+            "opening_bridge": "Open immediately after Part 1's turning point with no extended recap.",
+        },
+    }
+
+
 def ai_character_description(name: str, topic: str, content_prompt: str) -> str:
     """One-line appearance description for a character reference sheet.
 

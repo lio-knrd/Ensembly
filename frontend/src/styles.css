@@ -1192,6 +1192,24 @@ textarea {
   margin-top: 8px;
 }
 
+.split-preview {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0;
+}
+.split-preview > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.split-preview span {
+  color: var(--text-soft);
+  line-height: 1.45;
+}
+
 /* ---------- Panels (settings) ---------- */
 .panel {
   background: var(--surface);
