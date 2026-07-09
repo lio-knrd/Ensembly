@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 from sqlmodel import Session, select
 
 from . import prompts
@@ -301,6 +302,238 @@ def _apply_style(prompt: str, style: str) -> str:
     )
 
 
+def _unique_generated_title(session: Session, project: Project, requested: str) -> str:
+    base = (requested.strip() or project.title or "Untitled")[:120]
+    existing = {
+        title
+        for project_id, title in session.exec(select(Project.id, Project.title)).all()
+        if project_id != project.id
+    }
+    if base not in existing:
+        return base
+    number = 2
+    while True:
+        suffix = f" ({number})"
+        candidate = f"{base[:120 - len(suffix)].rstrip()}{suffix}"
+        if candidate not in existing:
+            return candidate
+        number += 1
+
+
+def _title_font(size: int, role: str = "headline") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    windows = {
+        "headline": ("impact.ttf", "arialbd.ttf", "bahnschrift.ttf"),
+        "kicker": ("segoeprb.ttf", "seguisb.ttf", "arialbd.ttf"),
+        "part": ("impact.ttf", "bahnschrift.ttf", "arialbd.ttf"),
+    }
+    candidates = tuple(Path("C:/Windows/Fonts") / name for name in windows.get(role, windows["headline"])) + (
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    )
+    for path in candidates:
+        if path.exists():
+            return ImageFont.truetype(str(path), size)
+    return ImageFont.load_default()
+
+
+def _fit_title_font(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    role: str,
+    max_size: int,
+    min_size: int,
+    max_width: int,
+    stroke_width: int = 0,
+):
+    size = max_size
+    while size > min_size:
+        font = _title_font(size, role)
+        box = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+        if box[2] - box[0] <= max_width:
+            return font
+        size -= 4
+    return _title_font(min_size, role)
+
+
+def _series_part_label(project: Project) -> str:
+    source = f"{project.topic_prompt}\n{project.title}"
+    match = re.search(r"\bPART\s*(\d+)\s*(?:OF|/)\s*(\d+)\b", source, re.IGNORECASE)
+    if match:
+        number, total = int(match.group(1)), int(match.group(2))
+        return "FINAL PART" if total > 1 and number == total else f"PART {number}"
+    if re.search(r"\bFINAL\s+PART\b", source, re.IGNORECASE):
+        return "FINAL PART"
+    match = re.search(r"\bPART\s*(\d+)\b", source, re.IGNORECASE)
+    return f"PART {match.group(1)}" if match else ""
+
+
+def _fallback_cover_title(title: str) -> str:
+    value = re.sub(r"^\s*the\s+story\s+of\s+", "", title, flags=re.IGNORECASE)
+    value = re.sub(r"\s*(?:[-—:]\s*)?(?:final\s+part|part\s*\d+)\s*$", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s*\(\d+\)\s*$", "", value).strip()
+    return value or title
+
+
+def _render_title_overlay(
+    source: Path,
+    output: Path,
+    headline: str,
+    kicker: str = "",
+    part_label: str = "",
+) -> Path:
+    with Image.open(source) as opened:
+        image = ImageOps.fit(opened.convert("RGB"), (1080, 1920), method=Image.Resampling.LANCZOS)
+    image = ImageEnhance.Brightness(image).enhance(0.88)
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    headline = headline.strip() or "UNTITLED"
+    kicker = kicker.strip().upper()
+    part_label = part_label.strip().upper()
+    headline_font = _fit_title_font(draw, headline, "headline", 190, 82, 920)
+    headline_box = draw.textbbox((0, 0), headline, font=headline_font)
+    headline_width = headline_box[2] - headline_box[0]
+    headline_height = headline_box[3] - headline_box[1]
+    bar_width = min(1020, max(620, headline_width + 100))
+    bar_top = 820
+    bar_bottom = bar_top + headline_height + 82
+
+    # A slight offset shadow and a saturated banner make the main subject read
+    # instantly at feed-thumbnail size.
+    draw.rounded_rectangle(
+        ((1080 - bar_width) / 2 + 13, bar_top + 15, (1080 + bar_width) / 2 + 13, bar_bottom + 15),
+        radius=16,
+        fill=(0, 0, 0, 145),
+    )
+    draw.rounded_rectangle(
+        ((1080 - bar_width) / 2, bar_top, (1080 + bar_width) / 2, bar_bottom),
+        radius=16,
+        fill=(255, 224, 0, 248),
+    )
+    draw.text(
+        (540, (bar_top + bar_bottom) / 2),
+        headline,
+        font=headline_font,
+        fill=(5, 5, 8, 255),
+        anchor="mm",
+    )
+
+    if kicker:
+        kicker_font = _fit_title_font(draw, kicker, "kicker", 68, 40, 860, 2)
+        kicker_box = draw.textbbox((0, 0), kicker, font=kicker_font, stroke_width=2)
+        kicker_width = kicker_box[2] - kicker_box[0]
+        kicker_height = kicker_box[3] - kicker_box[1]
+        kicker_y = bar_top - 66
+        draw.rounded_rectangle(
+            (
+                540 - kicker_width / 2 - 34,
+                kicker_y - kicker_height / 2 - 23,
+                540 + kicker_width / 2 + 34,
+                kicker_y + kicker_height / 2 + 23,
+            ),
+            radius=12,
+            fill=(8, 9, 13, 165),
+        )
+        draw.text(
+            (540, kicker_y),
+            kicker,
+            font=kicker_font,
+            fill=(255, 255, 255, 255),
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 235),
+            anchor="mm",
+        )
+
+    if part_label:
+        part_font = _fit_title_font(draw, part_label, "part", 108, 66, 760, 5)
+        draw.text(
+            (540, bar_bottom + 92),
+            part_label,
+            font=part_font,
+            fill=(255, 55, 28, 255),
+            stroke_width=7,
+            stroke_fill=(0, 0, 0, 235),
+            anchor="mm",
+        )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output, "PNG", optimize=True)
+    return output
+
+
+def _build_title_card(
+    session: Session,
+    project: Project,
+    mode: str,
+    source_path: str | None,
+    kicker: str,
+    text: str,
+    part_label: str,
+    prompt: str,
+) -> None:
+    folder = _folder(project)
+    title_text = text.strip() or project.title_card_text or _fallback_cover_title(project.title)
+    kicker_text = kicker.strip() or project.title_card_kicker
+    resolved_part_label = part_label.strip() or project.title_card_part_label or _series_part_label(project)
+    if mode == "generate":
+        title_prompt = prompt.strip() or (
+            f"Vertical cinematic cover image for a short-form story titled '{title_text}'. "
+            f"Subject: {project.topic_prompt}. Strong single focal point, dramatic composition, "
+            "clear negative space around the center for a title overlay. Do not render any words, "
+            "letters, logos, captions, borders, or watermarks."
+        )
+        title_prompt = _apply_style(title_prompt, _content_style(session, project))
+        background = folder / "images" / f"title_card_background_{project.title_card_version + 1:02d}.png"
+        source = Path(get_image_generator().generate(title_prompt, background, None))
+        project.title_card_prompt = prompt.strip()
+    else:
+        source = _asset_path(source_path)
+        if not source or not source.exists():
+            raise FileNotFoundError("The selected title-card source image is missing")
+        project.title_card_prompt = ""
+
+    output = folder / "images" / "title_card.png"
+    _render_title_overlay(source, output, title_text, kicker_text, resolved_part_label)
+    project.title_card_source_path = _rel(source)
+    project.title_card_path = _rel(output)
+    project.title_card_kicker = kicker_text
+    project.title_card_text = title_text
+    project.title_card_part_label = resolved_part_label
+    project.title_card_status = "ready"
+    project.title_card_version = (project.title_card_version or 0) + 1
+    _touch(project)
+    session.add(project)
+    session.commit()
+    bus.publish("project.title_card", project_id=project.id, status="ready")
+
+
+def generate_title_card(
+    project_id: str,
+    mode: str = "reuse",
+    source_path: str | None = None,
+    kicker: str = "",
+    text: str = "",
+    part_label: str = "",
+    prompt: str = "",
+) -> None:
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            return
+        project.title_card_status = "generating"
+        session.add(project)
+        session.commit()
+        bus.publish("project.title_card", project_id=project.id, status="generating")
+        try:
+            _build_title_card(
+                session, project, mode, source_path, kicker, text, part_label, prompt
+            )
+        except Exception as exc:  # noqa: BLE001
+            project.title_card_status = "failed"
+            project.status_message = f"Title image failed: {exc}"
+            session.add(project)
+            session.commit()
+            bus.publish("project.title_card", project_id=project.id, status="failed")
+
+
 def _write_project_snapshot(project: Project, folder: Path) -> None:
     (folder / "project.json").write_text(
         json.dumps(
@@ -360,6 +593,22 @@ def generate_script(project_id: str) -> None:
             return
         if _stop_if_canceled(session, project):
             return
+
+        generated_title = str(script.metadata.get("title", "")).strip()
+        if generated_title and not project.title_is_custom:
+            project.title = _unique_generated_title(session, project, generated_title)
+        project.title_card_kicker = str(
+            script.metadata.get("cover_kicker")
+            or script.metadata.get("hook_text")
+            or ""
+        ).strip()
+        project.title_card_text = str(
+            script.metadata.get("cover_title")
+            or _fallback_cover_title(project.title)
+        ).strip()
+        project.title_card_part_label = _series_part_label(project)
+        session.add(project)
+        session.commit()
 
         # Persist raw script.json snapshot.
         (folder / "script.json").write_text(
@@ -1055,6 +1304,25 @@ def generate_storyboard(project_id: str) -> None:
             return
         if _stop_if_canceled(session, project):
             return
+        if not project.title_card_path:
+            first = next((scene for scene in scenes if _asset_exists(scene.image_path)), None)
+            if first:
+                try:
+                    _build_title_card(
+                        session,
+                        project,
+                        "reuse",
+                        first.image_path,
+                        project.title_card_kicker,
+                        project.title_card_text,
+                        project.title_card_part_label,
+                        "",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    project.title_card_status = "failed"
+                    project.status_message = f"Storyboard ready; title image failed: {exc}"
+                    session.add(project)
+                    session.commit()
         _set_stage(session, project, Stage.STORYBOARD_READY, "Storyboard ready for review")
 
 

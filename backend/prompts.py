@@ -56,7 +56,11 @@ For each scene you must provide:
 
 Pace the total narration to fit the target duration the user provides \
 (assume roughly 2.5 spoken words per second). Also produce social metadata for \
-the finished video: a title, a description, and platform-appropriate hashtags.
+the finished video: a title, a description, and platform-appropriate hashtags. \
+Create thumbnail copy with two distinct levels: cover_kicker is a short, \
+intriguing context line of 2-5 words, while cover_title is the bold 1-3 word \
+subject or name that should dominate the cover. Do not put "Part 1", "Part 2", \
+or similar series numbering in either field; the pipeline adds that separately.
 
 Return ONLY the structured object defined by the response schema. Do not add \
 commentary before or after it.
@@ -158,8 +162,13 @@ SCRIPT_JSON_SCHEMA: dict = {
                 "hashtags": {"type": "array", "items": {"type": "string"}},
                 "suggested_caption": {"type": "string"},
                 "hook_text": {"type": "string"},
+                "cover_kicker": {"type": "string"},
+                "cover_title": {"type": "string"},
             },
-            "required": ["title", "description", "hashtags", "suggested_caption"],
+            "required": [
+                "title", "description", "hashtags", "suggested_caption",
+                "cover_kicker", "cover_title"
+            ],
             "additionalProperties": False,
         },
     },

@@ -57,6 +57,9 @@ class Project(SQLModel, table=True):
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     title: str
+    # A generated script title may replace the initial working title only when
+    # the creator did not explicitly provide one.
+    title_is_custom: bool = False
     topic_prompt: str
     platform_preset_id: Optional[str] = Field(default=None, foreign_key="platform_presets.id")
     content_preset_id: Optional[str] = Field(default=None, foreign_key="content_presets.id")
@@ -64,6 +67,14 @@ class Project(SQLModel, table=True):
     music_track_id: Optional[str] = Field(default=None, foreign_key="music_tracks.id")
     music_enabled: bool = True
     music_volume: float = 0.075
+    title_card_path: Optional[str] = None
+    title_card_source_path: Optional[str] = None
+    title_card_kicker: str = ""
+    title_card_text: str = ""
+    title_card_part_label: str = ""
+    title_card_prompt: str = ""
+    title_card_status: str = "pending"  # pending | generating | ready | failed
+    title_card_version: int = 0
     stage: Stage = Field(default=Stage.IDEA)
     folder_path: Optional[str] = None
     # Free-form status text surfaced during long-running generation, plus any error.

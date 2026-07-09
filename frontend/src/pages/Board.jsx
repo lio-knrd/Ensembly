@@ -136,6 +136,7 @@ function NewProjectModal({ onClose }) {
       api.createProject({
         ...projectInput(),
         title: resolvedTitle || title || topic,
+        title_is_custom: Boolean(title.trim()),
       }),
     onSuccess: finish,
   });

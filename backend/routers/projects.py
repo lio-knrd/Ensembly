@@ -21,6 +21,7 @@ from ..schemas import (
     ProjectSplitCreate,
     SceneAssetSelect,
     SceneUpdate,
+    TitleCardGenerate,
 )
 from ..events import bus
 from ..services.music_library import apply_default as apply_default_music
@@ -75,9 +76,11 @@ def _new_project(
     duration: int,
     platform_id: str | None,
     content_id: str | None,
+    title_is_custom: bool = False,
 ) -> Project:
     project = Project(
         title=_unique_title(session, title),
+        title_is_custom=title_is_custom,
         topic_prompt=topic_prompt.strip(),
         target_duration_seconds=duration,
         platform_preset_id=platform_id,
@@ -98,8 +101,9 @@ def list_projects(session: Session = Depends(get_session)):
         first = session.exec(
             select(Scene).where(Scene.project_id == p.id).order_by(Scene.order_index)
         ).first()
-        thumb = first.image_path if first and first.image_path else None
-        out.append({**p.model_dump(), "thumbnail": thumb, "thumbnail_version": first.asset_version if first else 0})
+        thumb = p.title_card_path or (first.image_path if first and first.image_path else None)
+        version = p.title_card_version if p.title_card_path else (first.asset_version if first else 0)
+        out.append({**p.model_dump(), "thumbnail": thumb, "thumbnail_version": version})
     return out
 
 
@@ -115,6 +119,7 @@ def create_project(body: ProjectCreate, session: Session = Depends(get_session))
         duration=int(duration),
         platform_id=platform.id if platform else None,
         content_id=content.id if content else None,
+        title_is_custom=body.title_is_custom if body.title_is_custom is not None else bool(body.title.strip()),
     )
     session.commit()
     session.refresh(project)
@@ -179,6 +184,7 @@ def create_split_projects(body: ProjectSplitCreate, session: Session = Depends(g
             duration=duration,
             platform_id=platform.id if platform else None,
             content_id=content.id if content else None,
+            title_is_custom=bool(body.title.strip()),
         ),
         _new_project(
             session,
@@ -187,6 +193,7 @@ def create_split_projects(body: ProjectSplitCreate, session: Session = Depends(g
             duration=duration,
             platform_id=platform.id if platform else None,
             content_id=content.id if content else None,
+            title_is_custom=bool(body.title.strip()),
         ),
     ]
     session.commit()
@@ -360,6 +367,44 @@ def cancel_project(project_id: str, session: Session = Depends(get_session)):
 def rerender(project_id: str, session: Session = Depends(get_session)):
     _require(session, project_id)
     pipeline.submit(pipeline.render, project_id)
+    return {"ok": True}
+
+
+@router.post("/{project_id}/title-card")
+def generate_title_card(
+    project_id: str,
+    body: TitleCardGenerate,
+    session: Session = Depends(get_session),
+):
+    project = _require(session, project_id)
+    if body.mode == "reuse":
+        if body.scene_id:
+            scene = _require_scene(session, project_id, body.scene_id)
+        else:
+            scene = session.exec(
+                select(Scene)
+                .where(Scene.project_id == project_id, Scene.image_path.is_not(None))
+                .order_by(Scene.order_index)
+            ).first()
+        if not scene or not scene.image_path:
+            raise HTTPException(400, "Choose a scene with a generated image")
+        source_path = scene.image_path
+    else:
+        source_path = None
+
+    project.title_card_status = "generating"
+    session.add(project)
+    session.commit()
+    pipeline.submit(
+        pipeline.generate_title_card,
+        project_id,
+        body.mode,
+        source_path,
+        body.kicker,
+        body.text,
+        body.part_label,
+        body.prompt,
+    )
     return {"ok": True}
 
 

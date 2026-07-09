@@ -10,7 +10,8 @@ from .models import SceneType
 
 # --- Projects ---
 class ProjectCreate(BaseModel):
-    title: str
+    title: str = ""
+    title_is_custom: Optional[bool] = None
     topic_prompt: str
     target_duration_seconds: Optional[int] = None
     platform_preset_id: Optional[str] = None
@@ -29,6 +30,15 @@ class ProjectScopeAnalyze(BaseModel):
 class ProjectSplitCreate(ProjectScopeAnalyze):
     analysis: dict
     start: bool = True
+
+
+class TitleCardGenerate(BaseModel):
+    mode: Literal["reuse", "generate"] = "reuse"
+    scene_id: Optional[str] = None
+    kicker: str = ""
+    text: str = ""
+    part_label: str = ""
+    prompt: str = ""
 
 
 class ProjectDetail(BaseModel):

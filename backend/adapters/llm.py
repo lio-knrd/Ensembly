@@ -192,6 +192,8 @@ class OfflineScriptGenerator(ScriptGenerator):
             "hashtags": ["#story", "#shorts", "#" + "".join(topic.title().split())[:24]],
             "suggested_caption": f"The Story of {topic.title()} — you won't believe how it ends. #story #shorts",
             "hook_text": f"What really happened with {topic}?",
+            "cover_kicker": "THE UNTOLD STORY",
+            "cover_title": textwrap.shorten(topic.title(), width=28, placeholder=""),
         }
         return GeneratedScript(scenes=scenes, metadata=metadata)
 

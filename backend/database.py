@@ -32,6 +32,15 @@ _ADDED_COLUMNS = [
     ("projects", "music_track_id", "TEXT DEFAULT NULL"),
     ("projects", "music_enabled", "BOOLEAN DEFAULT 1"),
     ("projects", "music_volume", "REAL DEFAULT 0.075"),
+    ("projects", "title_is_custom", "BOOLEAN DEFAULT 0"),
+    ("projects", "title_card_path", "TEXT DEFAULT NULL"),
+    ("projects", "title_card_source_path", "TEXT DEFAULT NULL"),
+    ("projects", "title_card_kicker", "TEXT DEFAULT ''"),
+    ("projects", "title_card_text", "TEXT DEFAULT ''"),
+    ("projects", "title_card_part_label", "TEXT DEFAULT ''"),
+    ("projects", "title_card_prompt", "TEXT DEFAULT ''"),
+    ("projects", "title_card_status", "TEXT DEFAULT 'pending'"),
+    ("projects", "title_card_version", "INTEGER DEFAULT 0"),
     ("ideas", "plan_id", "TEXT DEFAULT NULL"),
 ]
 
@@ -58,6 +67,10 @@ def _run_migrations() -> None:
             cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
             if column not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}"))
+                # Titles that predate this flag may have been explicitly chosen;
+                # preserve them instead of treating every legacy row as AI-owned.
+                if table == "projects" and column == "title_is_custom":
+                    conn.execute(text("UPDATE projects SET title_is_custom = 1"))
 
 
 def get_session() -> Iterator[Session]:

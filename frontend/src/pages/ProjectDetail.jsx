@@ -68,6 +68,9 @@ export default function ProjectDetail() {
       <StageProgress stage={project.stage} />
       <StageBar project={project} scenes={scenes} />
       {showSoundtrack(project.stage) && <SoundtrackPanel projectId={id} />}
+      {scenes.some((scene) => scene.image_path) && (
+        <TitleCardPanel project={project} scenes={scenes} />
+      )}
 
       {project.error && <div className="banner">Error — {project.error}</div>}
 
@@ -95,6 +98,140 @@ export default function ProjectDetail() {
 
 function showSoundtrack(stage) {
   return !["IDEA", "SCRIPT_GENERATING"].includes(stage);
+}
+
+function TitleCardPanel({ project, scenes }) {
+  const qc = useQueryClient();
+  const usableScenes = scenes.filter((scene) => scene.image_path);
+  const [sceneId, setSceneId] = useState(usableScenes[0]?.id || "");
+  const [kicker, setKicker] = useState(project.title_card_kicker || "");
+  const [text, setText] = useState(project.title_card_text || project.title || "");
+  const [partLabel, setPartLabel] = useState(project.title_card_part_label || "");
+  const [prompt, setPrompt] = useState(project.title_card_prompt || "");
+  const busy = project.title_card_status === "generating";
+  const cover = mediaUrl(project.title_card_path, project.title_card_version);
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["project", project.id] });
+    qc.invalidateQueries({ queryKey: ["projects"] });
+  };
+  const create = useMutation({
+    mutationFn: (mode) =>
+      api.generateTitleCard(project.id, {
+        mode,
+        scene_id: mode === "reuse" ? sceneId : null,
+        kicker,
+        text,
+        part_label: partLabel,
+        prompt,
+      }),
+    onSuccess: invalidate,
+  });
+
+  useEffect(() => {
+    setKicker(project.title_card_kicker || "");
+    setText(project.title_card_text || project.title || "");
+    setPartLabel(project.title_card_part_label || "");
+  }, [
+    project.title,
+    project.title_card_kicker,
+    project.title_card_text,
+    project.title_card_part_label,
+  ]);
+
+  return (
+    <div className="panel title-card-panel">
+      <div className="title-card-preview">
+        {cover ? (
+          <img src={cover} alt={`Title image: ${project.title_card_text || project.title}`} />
+        ) : (
+          <div className="title-card-placeholder">No title image yet</div>
+        )}
+        {busy && (
+          <div className="title-card-busy">
+            <span className="spinner" /> Creating title image…
+          </div>
+        )}
+      </div>
+      <div className="title-card-controls">
+        <div>
+          <h2>Title image</h2>
+          <p className="panel-sub">
+            A short hook, one dominant subject and an optional series label create the
+            thumbnail hierarchy. Part numbering is detected automatically for split projects.
+          </p>
+        </div>
+        <div className="title-copy-grid">
+          <div className="field">
+            <label>Small hook / kicker</label>
+            <input
+              value={kicker}
+              maxLength={50}
+              placeholder="ZEUS' BIGGEST CHALLENGE"
+              onChange={(event) => setKicker(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label>Series label (optional)</label>
+            <input
+              value={partLabel}
+              maxLength={24}
+              placeholder="PART 1 or FINAL PART"
+              onChange={(event) => setPartLabel(event.target.value)}
+            />
+          </div>
+        </div>
+        <div className="field">
+          <label>Dominant cover title</label>
+          <input
+            value={text}
+            maxLength={60}
+            placeholder="TYPHON"
+            onChange={(event) => setText(event.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label>Storyboard image</label>
+          <div className="row">
+            <select value={sceneId} onChange={(event) => setSceneId(event.target.value)}>
+              {usableScenes.map((scene) => (
+                <option key={scene.id} value={scene.id}>
+                  Scene {scene.order_index + 1}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn"
+              disabled={busy || create.isPending || !sceneId || !text.trim()}
+              onClick={() => create.mutate("reuse")}
+            >
+              Use scene
+            </button>
+          </div>
+        </div>
+        <div className="field">
+          <label>Optional prompt for a dedicated cover</label>
+          <textarea
+            value={prompt}
+            placeholder="Leave blank to derive it from the project topic and visual style"
+            onChange={(event) => setPrompt(event.target.value)}
+          />
+        </div>
+        <div className="row">
+          <button
+            className="btn primary"
+            disabled={busy || create.isPending || !text.trim()}
+            onClick={() => create.mutate("generate")}
+          >
+            Generate new cover
+          </button>
+          {project.title_card_status === "failed" && (
+            <span className="banner compact">Title image generation failed.</span>
+          )}
+          {create.error && <span className="banner compact">{create.error.message}</span>}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function StageProgress({ stage }) {
