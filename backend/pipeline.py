@@ -896,27 +896,34 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
     entries: dict[str, dict] = {}
     for scene in scenes:
         assignments = scene.character_assignments or []
+        assigned_character_ids: set[str] = set()
         if assignments:
             for assignment in assignments:
                 cid = assignment.get("character_id")
                 char = session.get(Character, cid) if cid else None
                 if not char:
                     continue
+                assigned_character_ids.add(char.id)
                 state = str(assignment.get("state", "") or "").strip()
                 form_id = assignment.get("form_id")
                 key = f"{char.id}:{form_id or _norm(state) or 'default'}"
                 if key not in entries:
                     entries[key] = {"character": char, "assignment": assignment}
                     order.append(key)
-        else:
-            for cid in scene.character_ids:
-                char = session.get(Character, cid)
-                if not char:
-                    continue
-                key = f"{char.id}:default"
-                if key not in entries:
-                    entries[key] = {"character": char, "assignment": {}}
-                    order.append(key)
+        # character_ids is the broad scene membership list. Older/mixed scenes
+        # can have structured assignments for only some members, so merge in
+        # every unrepresented character instead of treating the two fields as
+        # mutually exclusive.
+        for cid in scene.character_ids:
+            if cid in assigned_character_ids:
+                continue
+            char = session.get(Character, cid)
+            if not char:
+                continue
+            key = f"{char.id}:default"
+            if key not in entries:
+                entries[key] = {"character": char, "assignment": {}}
+                order.append(key)
         for name in scene.suggested_characters:
             key = name.lower()
             if key not in entries:
@@ -1142,7 +1149,7 @@ def _reconcile_scene_assignments(
             assignment["form_name"] = form.name
             assignment["missing_form"] = False
             changed = True
-        if not assignments and char.id in (scene.character_ids or []) and not target_state:
+        if not changed and char.id in (scene.character_ids or []) and not target_state:
             assignments.append(_assignment_for_character(session, char, {
                 "state": "",
                 "state_importance": "default",
@@ -1372,9 +1379,12 @@ def _scene_character_refs(session, scene: Scene) -> list[dict]:
     """Character identity refs for prompts, images, and video elements."""
     root = Path(settings.projects_dir.parent.parent)
     refs: list[dict] = []
+    assigned_character_ids: set[str] = set()
     if scene.character_assignments:
         for assignment in scene.character_assignments:
             char = session.get(Character, assignment.get("character_id")) if assignment.get("character_id") else None
+            if char:
+                assigned_character_ids.add(char.id)
             form = _form_for_assignment(session, char, assignment) if char else None
             if not char or not form or not form.reference_image_path:
                 continue
@@ -1389,9 +1399,10 @@ def _scene_character_refs(session, scene: Scene) -> list[dict]:
                 "path": path,
                 "variants": variants,
             })
-        return refs
 
     for cid in scene.character_ids:
+        if cid in assigned_character_ids:
+            continue
         char = session.get(Character, cid)
         if not char or not char.reference_image_path:
             continue
