@@ -50,8 +50,10 @@ class SceneUpdate(BaseModel):
     image_prompt: Optional[str] = None
     continuity_context: Optional[list[dict]] = None
     scene_type: Optional[SceneType] = None
+    use_next_scene_as_end_frame: Optional[bool] = None
     approved: Optional[bool] = None
     character_ids: Optional[list[str]] = None
+    character_assignments: Optional[list[dict]] = None
     excluded_context_scene_ids: Optional[list[str]] = None
 
 
@@ -91,6 +93,7 @@ class StyleSuggestionIn(BaseModel):
 # --- Cast / character sheets (pre-storyboard review) ---
 class CastSheetGenerate(BaseModel):
     name: str
+    state: Optional[str] = None
     description: Optional[str] = None  # appearance notes; blank = derive
     prompt: Optional[str] = None  # full override of the reference-image prompt
     generate_description: bool = False  # let the LLM write the description first

@@ -7,6 +7,7 @@ be re-run for a single scene or the whole project without restarting from IDEA.
 from __future__ import annotations
 
 import json
+import re
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from .database import engine
 from .events import bus
 from .models import (
     Character,
+    CharacterForm,
     ContentPreset,
     MusicTrack,
     PlatformPreset,
@@ -159,6 +161,24 @@ def _asset_exists(path: str | None) -> bool:
     return bool(resolved and resolved.exists())
 
 
+def _timestamp_duration(path: Path | None) -> float | None:
+    if not path or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        duration = data.get("duration")
+        return float(duration) if duration is not None else None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _save_scene_ready(session: Session, project: Project, scene: Scene) -> None:
+    scene.status = "ready"
+    session.add(scene)
+    session.commit()
+    bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+
+
 def _content_style(session: Session, project: Project) -> str:
     """The image style prompt from the project's content preset (may be empty)."""
     if not project.content_preset_id:
@@ -173,6 +193,81 @@ def _content_voice_id(session: Session, project: Project) -> str | None:
         return None
     preset = session.get(ContentPreset, project.content_preset_id)
     return (preset.voice_id if preset else "") or None
+
+
+def _norm(text: str | None) -> str:
+    return " ".join((text or "").strip().lower().replace("_", " ").replace("-", " ").split())
+
+
+def _default_form(session: Session, char: Character) -> CharacterForm:
+    form = session.exec(
+        select(CharacterForm).where(
+            CharacterForm.character_id == char.id,
+            CharacterForm.is_default == True,  # noqa: E712
+        )
+    ).first()
+    if form:
+        return form
+    form = CharacterForm(
+        character_id=char.id,
+        name="Default",
+        description=char.description,
+        reference_image_path=char.reference_image_path,
+        reference_prompt=char.reference_prompt,
+        reference_style_prompt=char.reference_style_prompt,
+        reference_version=char.reference_version,
+        variant_paths=char.variant_paths,
+        is_default=True,
+    )
+    session.add(form)
+    session.commit()
+    session.refresh(form)
+    return form
+
+
+def _match_character_form(session: Session, char: Character, state: str) -> CharacterForm | None:
+    if not _norm(state):
+        return _default_form(session, char)
+    target = _norm(state)
+    forms = session.exec(select(CharacterForm).where(CharacterForm.character_id == char.id)).all()
+    for form in forms:
+        candidates = [form.name, form.state, *(form.trigger_phrases or [])]
+        if any(_norm(candidate) == target for candidate in candidates):
+            return form
+    return None
+
+
+def _form_for_assignment(
+    session: Session,
+    char: Character,
+    assignment: dict,
+) -> CharacterForm | None:
+    """Resolve a scene assignment, including assignments saved before its form existed."""
+    form_id = assignment.get("form_id")
+    form = session.get(CharacterForm, form_id) if form_id else None
+    if form and form.character_id == char.id:
+        return form
+    return _match_character_form(session, char, str(assignment.get("state", "") or ""))
+
+
+def _assignment_for_character(session: Session, char: Character, raw: dict) -> dict:
+    state = str(raw.get("state", "") or "").strip()
+    importance = str(raw.get("state_importance", "default") or "default").strip()
+    notes = str(raw.get("state_notes", "") or "").strip()
+    form = _match_character_form(session, char, state)
+    missing_form = bool(state and not form)
+    if not form and not state:
+        form = _default_form(session, char)
+    return {
+        "character_id": char.id,
+        "character_name": char.name,
+        "form_id": form.id if form and not missing_form else None,
+        "form_name": form.name if form and not missing_form else "",
+        "state": state,
+        "state_importance": importance,
+        "state_notes": notes,
+        "missing_form": missing_form,
+    }
 
 
 def _apply_style(prompt: str, style: str) -> str:
@@ -266,11 +361,25 @@ def generate_script(project_id: str) -> None:
         by_name = {c.name.lower(): c for c in characters}
 
         for idx, s in enumerate(script.scenes):
-            matched, suggested = [], []
-            for cname in s.characters:
+            matched, suggested, assignments = [], [], []
+            for raw_char in s.characters:
+                if isinstance(raw_char, dict):
+                    cname = str(raw_char.get("name", "")).strip()
+                    char_payload = raw_char
+                else:
+                    cname = str(raw_char).strip()
+                    char_payload = {
+                        "name": cname,
+                        "state": "",
+                        "state_importance": "default",
+                        "state_notes": "",
+                    }
+                if not cname:
+                    continue
                 found = by_name.get(cname.lower())
                 if found:
                     matched.append(found.id)
+                    assignments.append(_assignment_for_character(session, found, char_payload))
                     link_exists = session.get(ProjectCharacter, (project.id, found.id))
                     if not link_exists:
                         session.add(ProjectCharacter(project_id=project.id, character_id=found.id))
@@ -285,6 +394,7 @@ def generate_script(project_id: str) -> None:
                     continuity_context=s.continuity_context,
                     scene_type=SceneType(s.scene_type),
                     character_ids=matched,
+                    character_assignments=assignments,
                     suggested_characters=suggested,
                     status="pending",
                 )
@@ -508,52 +618,82 @@ def _final_ready(project: Project) -> bool:
 def compute_cast(session: Session, project: Project) -> list[dict]:
     """The distinct characters referenced by this project's scenes.
 
-    Each entry reports whether a reference sheet exists yet, so the UI can flag
-    what's missing before storyboard generation.
+    Each entry reports whether the selected/default form has a reference sheet,
+    so the UI can flag what's missing before storyboard generation.
     """
     scenes = session.exec(select(Scene).where(Scene.project_id == project.id)).all()
     order: list[str] = []
-    linked: dict[str, str] = {}  # name(lower) -> character_id
+    entries: dict[str, dict] = {}
     for scene in scenes:
-        for cid in scene.character_ids:
-            char = session.get(Character, cid)
-            if char:
-                key = char.name.lower()
-                linked[key] = char.id
-                if key not in order:
+        assignments = scene.character_assignments or []
+        if assignments:
+            for assignment in assignments:
+                cid = assignment.get("character_id")
+                char = session.get(Character, cid) if cid else None
+                if not char:
+                    continue
+                state = str(assignment.get("state", "") or "").strip()
+                form_id = assignment.get("form_id")
+                key = f"{char.id}:{form_id or _norm(state) or 'default'}"
+                if key not in entries:
+                    entries[key] = {"character": char, "assignment": assignment}
+                    order.append(key)
+        else:
+            for cid in scene.character_ids:
+                char = session.get(Character, cid)
+                if not char:
+                    continue
+                key = f"{char.id}:default"
+                if key not in entries:
+                    entries[key] = {"character": char, "assignment": {}}
                     order.append(key)
         for name in scene.suggested_characters:
             key = name.lower()
-            if key not in order:
+            if key not in entries:
+                entries[key] = {"suggested_name": name}
                 order.append(key)
 
-    # Resolve display names & sheet status.
-    by_id = {c.id: c for c in session.exec(select(Character)).all()}
-    by_name = {c.name.lower(): c for c in by_id.values()}
     cast: list[dict] = []
     for key in order:
-        char = by_id.get(linked.get(key)) or by_name.get(key)
+        entry = entries[key]
+        char = entry.get("character")
         if char:
-            has_sheet = bool(char.reference_image_path)
+            assignment = entry.get("assignment") or {}
+            state = str(assignment.get("state", "") or "").strip()
+            form = _form_for_assignment(session, char, assignment)
+            has_sheet = bool(form.reference_image_path if form else False)
+            form_name = form.name if form else (state or "Default")
+            description = form.description if form and form.description else char.description
             cast.append({
+                "key": key,
                 "name": char.name,
                 "character_id": char.id,
-                "description": char.description,
+                "form_id": form.id if form else None,
+                "form_name": form_name,
+                "state": state,
+                "state_importance": assignment.get("state_importance", "default"),
+                "state_notes": assignment.get("state_notes", ""),
+                "missing_form": bool(state and not form),
+                "description": description,
                 "has_sheet": has_sheet,
-                "reference_image_path": char.reference_image_path,
-                "reference_version": char.reference_version,
-                "reference_prompt": char.reference_prompt,
-                "reference_style_prompt": char.reference_style_prompt,
+                "reference_image_path": form.reference_image_path if form else None,
+                "reference_version": form.reference_version if form else 0,
+                "reference_prompt": form.reference_prompt if form else "",
+                "reference_style_prompt": form.reference_style_prompt if form else "",
             })
         else:
             # Suggested-but-not-yet-created character.
-            display = next(
-                (n for s in scenes for n in s.suggested_characters if n.lower() == key),
-                key.title(),
-            )
+            display = entry.get("suggested_name") or key.title()
             cast.append({
+                "key": key,
                 "name": display,
                 "character_id": None,
+                "form_id": None,
+                "form_name": "Default",
+                "state": "",
+                "state_importance": "default",
+                "state_notes": "",
+                "missing_form": False,
                 "description": "",
                 "has_sheet": False,
                 "reference_image_path": None,
@@ -570,12 +710,13 @@ def generate_character_sheet(
     description: str | None,
     prompt: str | None,
     generate_description: bool,
+    state: str | None = None,
 ) -> None:
-    """Create/attach a global character and generate its reference sheet.
+    """Create/attach a global character or form and generate its reference sheet.
 
     Uses the project's content-preset image style so sheets match the scenes.
     """
-    from .storage import character_folder
+    from .storage import character_folder, slugify
 
     with Session(engine) as session:
         project = session.get(Project, project_id)
@@ -611,19 +752,58 @@ def generate_character_sheet(
         session.commit()
         session.refresh(char)
 
+        form = _match_character_form(session, char, state)
+        if not form:
+            form = CharacterForm(
+                character_id=char.id,
+                name=state or "Default",
+                state=state,
+                is_default=not bool(state),
+            )
+        if description:
+            form.description = description.strip()
+        elif state and not form.description and generate_description:
+            content = (
+                session.get(ContentPreset, project.content_preset_id)
+                if project.content_preset_id
+                else None
+            )
+            form.description = ai_character_description(
+                f"{char.name} ({state})",
+                project.topic_prompt,
+                content.content_prompt if content else "",
+            )
+        elif not form.description:
+            form.description = char.description
+
         style = _content_style(session, project)
-        ref_prompt = _apply_style(prompt, style) if prompt else _default_sheet_prompt(char.name, char.description, style)
+        form_label = f"{char.name} ({state})" if state else char.name
+        form_description = form.description or char.description
+        ref_prompt = (
+            _apply_style(prompt, style)
+            if prompt
+            else _default_sheet_prompt(form_label, form_description, style)
+        )
         try:
             folder = character_folder(char.name)
-            out = get_image_generator().generate(ref_prompt, folder / "reference.png", None)
+            (folder / "forms").mkdir(parents=True, exist_ok=True)
+            out_name = "reference.png" if not state else f"forms/{slugify(state)}.png"
+            out = get_image_generator().generate(ref_prompt, folder / out_name, None)
             if _stop_if_canceled(session, project):
                 return
-            char.reference_image_path = _rel(out)
-            char.reference_prompt = ref_prompt
-            char.reference_style_prompt = style
-            char.reference_version = (char.reference_version or 0) + 1
+            form.reference_image_path = _rel(out)
+            form.reference_prompt = ref_prompt
+            form.reference_style_prompt = style
+            form.reference_version = (form.reference_version or 0) + 1
+            if form.is_default:
+                char.reference_image_path = form.reference_image_path
+                char.reference_prompt = form.reference_prompt
+                char.reference_style_prompt = form.reference_style_prompt
+                char.reference_version = form.reference_version
             session.add(char)
+            session.add(form)
             session.commit()
+            session.refresh(form)
         except Exception as exc:  # noqa: BLE001
             if _stop_if_canceled(session, project):
                 return
@@ -642,6 +822,7 @@ def generate_character_sheet(
             if char.id not in scene.character_ids:
                 scene.character_ids = [*scene.character_ids, char.id]
             session.add(scene)
+        _reconcile_scene_assignments(session, project.id, char, form, state)
         session.commit()
 
         cast = compute_cast(session, project)
@@ -657,19 +838,64 @@ def generate_character_sheet(
         bus.publish("cast.updated", project_id=project.id)
 
 
+def _reconcile_scene_assignments(
+    session: Session,
+    project_id: str,
+    char: Character,
+    form: CharacterForm,
+    state: str | None,
+) -> None:
+    target_state = _norm(state)
+    for scene in session.exec(select(Scene).where(Scene.project_id == project_id)):
+        # JSON columns do not track mutations inside their nested dictionaries.
+        # Copy each assignment so assigning the list back is seen as a change.
+        assignments = [dict(assignment) for assignment in (scene.character_assignments or [])]
+        changed = False
+        for assignment in assignments:
+            if assignment.get("character_id") != char.id:
+                continue
+            if _norm(assignment.get("state")) != target_state:
+                continue
+            assignment["form_id"] = form.id
+            assignment["form_name"] = form.name
+            assignment["missing_form"] = False
+            changed = True
+        if not assignments and char.id in (scene.character_ids or []) and not target_state:
+            assignments.append(_assignment_for_character(session, char, {
+                "state": "",
+                "state_importance": "default",
+                "state_notes": "",
+            }))
+            changed = True
+        if changed:
+            scene.character_assignments = assignments
+            session.add(scene)
+
+
 def generate_missing_sheets(project_id: str) -> None:
     """Auto-generate reference sheets for every character still missing one."""
     with Session(engine) as session:
         project = session.get(Project, project_id)
         if not project:
             return
-        missing = [c["name"] for c in compute_cast(session, project) if not c["has_sheet"]]
-    for name in missing:
+        missing = [
+            {"name": c["name"], "state": c.get("state") or ""}
+            for c in compute_cast(session, project)
+            if not c["has_sheet"]
+        ]
+    for item in missing:
         with Session(engine) as session:
             project = session.get(Project, project_id)
             if not project or _stop_if_canceled(session, project):
                 return
-        generate_character_sheet(project_id, name, None, None, generate_description=True)
+        generate_character_sheet(
+            project_id,
+            item["name"],
+            None,
+            None,
+            generate_description=True,
+            state=item["state"],
+        )
 
 
 def _default_sheet_prompt(name: str, description: str, style: str) -> str:
@@ -707,19 +933,28 @@ def generate_audio(project_id: str) -> None:
             for scene in scenes:
                 if _stop_if_canceled(session, project):
                     return
-                if _asset_exists(scene.audio_path) and _asset_exists(scene.timestamps_path):
-                    if scene.status != "ready":
-                        scene.status = "ready"
-                        session.add(scene)
-                        session.commit()
-                        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+                audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
+                ts_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.timestamps.json"
+
+                existing_duration = scene.duration_seconds
+                if existing_duration is None:
+                    existing_duration = _timestamp_duration(_asset_path(scene.timestamps_path))
+                if _asset_exists(scene.audio_path) and _asset_exists(scene.timestamps_path) and existing_duration is not None:
+                    scene.duration_seconds = existing_duration
+                    _save_scene_ready(session, project, scene)
+                    continue
+
+                existing_duration = _timestamp_duration(ts_out)
+                if audio_out.exists() and existing_duration is not None:
+                    scene.audio_path = _rel(audio_out)
+                    scene.timestamps_path = _rel(ts_out)
+                    scene.duration_seconds = existing_duration
+                    _save_scene_ready(session, project, scene)
                     continue
                 scene.status = "generating"
                 session.add(scene)
                 session.commit()
                 bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="audio")
-                audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
-                ts_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.timestamps.json"
                 result = tts.synthesize(scene.narration_text, audio_out, ts_out)
                 if _stop_if_canceled(session, project):
                     return
@@ -762,12 +997,13 @@ def generate_storyboard(project_id: str) -> None:
             for scene in scenes:
                 if _stop_if_canceled(session, project):
                     return
+                out = folder / "images" / f"scene_{scene.order_index + 1:02d}.png"
                 if _asset_exists(scene.image_path):
-                    if scene.status != "ready":
-                        scene.status = "ready"
-                        session.add(scene)
-                        session.commit()
-                        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+                    _save_scene_ready(session, project, scene)
+                    continue
+                if out.exists():
+                    scene.image_path = _rel(out)
+                    _save_scene_ready(session, project, scene)
                     continue
                 if not _generate_scene_image(session, project, scene, folder, img):
                     return
@@ -821,6 +1057,25 @@ def _scene_character_refs(session, scene: Scene) -> list[dict]:
     """Character identity refs for prompts, images, and video elements."""
     root = Path(settings.projects_dir.parent.parent)
     refs: list[dict] = []
+    if scene.character_assignments:
+        for assignment in scene.character_assignments:
+            char = session.get(Character, assignment.get("character_id")) if assignment.get("character_id") else None
+            form = _form_for_assignment(session, char, assignment) if char else None
+            if not char or not form or not form.reference_image_path:
+                continue
+            path = root / form.reference_image_path
+            if not path.exists():
+                continue
+            variants = [root / v for v in (form.variant_paths or []) if (root / v).exists()]
+            label = char.name if not assignment.get("state") else f"{char.name} ({assignment.get('state')})"
+            refs.append({
+                "name": label,
+                "description": form.description or char.description,
+                "path": path,
+                "variants": variants,
+            })
+        return refs
+
     for cid in scene.character_ids:
         char = session.get(Character, cid)
         if not char or not char.reference_image_path:
@@ -1013,12 +1268,13 @@ def generate_clips(project_id: str) -> None:
                     return
                 if scene.scene_type != SceneType.VIDEO or not scene.image_path:
                     continue
+                out = folder / "clips" / f"scene_{scene.order_index + 1:02d}.mp4"
                 if _asset_exists(scene.clip_path):
-                    if scene.status != "ready":
-                        scene.status = "ready"
-                        session.add(scene)
-                        session.commit()
-                        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+                    _save_scene_ready(session, project, scene)
+                    continue
+                if out.exists():
+                    scene.clip_path = _rel(out)
+                    _save_scene_ready(session, project, scene)
                     continue
                 if not _generate_scene_clip(session, project, scene, folder, vid):
                     return
@@ -1072,7 +1328,11 @@ def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> b
         out,
         duration,
         elements=[(ref["path"], ref["variants"]) for ref in element_refs] or None,
-        end_image_path=_next_scene_image(session, project, scene),
+        end_image_path=(
+            _next_scene_image(session, project, scene)
+            if scene.use_next_scene_as_end_frame
+            else None
+        ),
     )
     if _stop_if_canceled(session, project):
         return False
@@ -1127,6 +1387,7 @@ def render(project_id: str) -> None:
 
             narration = folder / "audio" / "full_narration.mp3"
             music_path = None
+            music_track = None
             if project.music_enabled and project.music_track_id:
                 music_track = session.get(MusicTrack, project.music_track_id)
                 music_path = local_track_path(music_track)
@@ -1142,7 +1403,7 @@ def render(project_id: str) -> None:
             if _stop_if_canceled(session, project):
                 return
 
-            _write_metadata(folder, project)
+            _write_metadata(folder, project, music_track if music_path else None)
         except Exception as exc:  # noqa: BLE001
             if _stop_if_canceled(session, project):
                 return
@@ -1153,8 +1414,12 @@ def render(project_id: str) -> None:
         _set_stage(session, project, Stage.DONE, "Done")
 
 
-def _write_metadata(folder: Path, project: Project) -> None:
-    """Reuse the script-generation metadata for final/metadata.json."""
+def _write_metadata(
+    folder: Path,
+    project: Project,
+    music_track: MusicTrack | None = None,
+) -> None:
+    """Reuse script metadata and add required soundtrack attribution."""
     meta = {}
     script_path = folder / "script.json"
     if script_path.exists():
@@ -1169,7 +1434,34 @@ def _write_metadata(folder: Path, project: Project) -> None:
         "suggested_caption",
         f"{meta.get('title', project.title)} {' '.join(meta.get('hashtags', []))}".strip(),
     )
+    if music_track:
+        attribution = _music_attribution(music_track)
+        description = str(meta.get("description", "") or "").strip()
+        meta["description"] = f"{description}\n\n{attribution}".strip()
+        meta["music_attribution"] = attribution
     (folder / "final" / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def _music_attribution(track: MusicTrack) -> str:
+    source_url = track.share_url or f"https://www.jamendo.com/track/{track.provider_track_id}"
+    license_name = _creative_commons_license_name(track.license_url)
+    return "\n".join(
+        [
+            "Music credit:",
+            f'"{track.title}" by {track.artist_name or "Jamendo artist"}',
+            f"Source: {source_url}",
+            f"License: {license_name} ({track.license_url})",
+            "Changes: shortened and mixed with narration.",
+        ]
+    )
+
+
+def _creative_commons_license_name(license_url: str) -> str:
+    match = re.search(r"/licenses/([^/]+)/([^/]+)/?", (license_url or "").lower())
+    if not match:
+        return "Creative Commons"
+    license_code, version = match.groups()
+    return f"CC {license_code.upper()} {version}"
 
 
 # --------------------------------------------------------------------------- #

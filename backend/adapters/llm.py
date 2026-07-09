@@ -55,12 +55,33 @@ def _coerce_script(data: dict) -> GeneratedScript:
                     "visual_anchor": visual_anchor,
                     "reason": reason,
                 })
+        characters = []
+        for item in raw.get("characters", []) or []:
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+                if not name:
+                    continue
+                characters.append({
+                    "name": name,
+                    "state": str(item.get("state", "") or "").strip(),
+                    "state_importance": str(item.get("state_importance", "default") or "default").strip(),
+                    "state_notes": str(item.get("state_notes", "") or "").strip(),
+                })
+            else:
+                name = str(item).strip()
+                if name:
+                    characters.append({
+                        "name": name,
+                        "state": "",
+                        "state_importance": "default",
+                        "state_notes": "",
+                    })
         scenes.append(
             GeneratedScene(
                 narration_text=str(raw.get("narration_text", "")).strip(),
                 image_prompt=str(raw.get("image_prompt", "")).strip(),
                 scene_type=st,
-                characters=[str(c).strip() for c in raw.get("characters", []) if str(c).strip()],
+                characters=characters,
                 continuity_context=continuity_context,
             )
         )
@@ -150,7 +171,15 @@ class OfflineScriptGenerator(ScriptGenerator):
                     scene_type=scene_type,
                     # Spread the guessed cast across scenes so the character-sheet
                     # review step is exercised offline too.
-                    characters=cast[: (1 if i % 2 == 0 else len(cast))] if cast else [],
+                    characters=[
+                        {
+                            "name": name,
+                            "state": "",
+                            "state_importance": "default",
+                            "state_notes": "",
+                        }
+                        for name in (cast[: (1 if i % 2 == 0 else len(cast))] if cast else [])
+                    ],
                     continuity_context=[],
                 )
             )

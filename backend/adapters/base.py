@@ -11,7 +11,7 @@ class GeneratedScene:
     narration_text: str
     image_prompt: str
     scene_type: str  # "still" | "video"
-    characters: list[str] = field(default_factory=list)
+    characters: list[dict] = field(default_factory=list)
     continuity_context: list[dict] = field(default_factory=list)
 
 

@@ -43,6 +43,12 @@ def project_metadata(folder_path: str | None) -> dict:
     if not folder_path:
         return {}
     root = settings.projects_dir.parent.parent
+    final = root / folder_path / "final" / "metadata.json"
+    if final.exists():
+        try:
+            return json.loads(final.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
     script = root / folder_path / "script.json"
     if script.exists():
         try:

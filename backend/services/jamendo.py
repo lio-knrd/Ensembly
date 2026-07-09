@@ -37,7 +37,12 @@ def _license_is_usable(license_url: str) -> bool:
     license_url = (license_url or "").lower()
     if not license_url:
         return False
-    return "/by-nc" not in license_url and "/by-nd" not in license_url
+    return (
+        "/licenses/by/" in license_url
+        and "/by-nc" not in license_url
+        and "/by-nd" not in license_url
+        and "/by-sa" not in license_url
+    )
 
 
 def search_tracks(query: str, limit: int = 20, instrumental: bool = True) -> list[dict]:
@@ -52,7 +57,7 @@ def search_tracks(query: str, limit: int = 20, instrumental: bool = True) -> lis
         "audiodlformat": "mp32",
         "ccnc": "false",
         "ccnd": "false",
-        "content_id_free": "true",
+        "ccsa": "false",
         "groupby": "artist_id",
     }
     if instrumental:

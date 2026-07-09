@@ -1,7 +1,8 @@
 """SQLModel table definitions — the fixed data model (spec section 6).
 
 SQLite has no native array type, so list-valued columns (character_ids,
-variant_paths) are stored as JSON via `sa_column=Column(JSON)`.
+character_assignments, variant_paths) are stored as JSON via
+`sa_column=Column(JSON)`.
 """
 from __future__ import annotations
 
@@ -85,7 +86,10 @@ class Scene(SQLModel, table=True):
     image_prompt: str = ""
     continuity_context: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     scene_type: SceneType = Field(default=SceneType.STILL)
+    # For video scenes, optionally animate toward the following scene's still.
+    use_next_scene_as_end_frame: bool = True
     character_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    character_assignments: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     # Names the LLM flagged that don't yet exist in the global library.
     suggested_characters: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     excluded_context_scene_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
@@ -111,6 +115,24 @@ class Character(SQLModel, table=True):
     reference_style_prompt: str = ""
     reference_version: int = 0
     variant_paths: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=_now)
+
+
+class CharacterForm(SQLModel, table=True):
+    __tablename__ = "character_forms"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    character_id: str = Field(foreign_key="characters.id", index=True)
+    name: str = "Default"
+    state: str = ""
+    description: str = ""
+    reference_image_path: Optional[str] = None
+    reference_prompt: str = ""
+    reference_style_prompt: str = ""
+    reference_version: int = 0
+    variant_paths: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    trigger_phrases: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    is_default: bool = False
     created_at: datetime = Field(default_factory=_now)
 
 

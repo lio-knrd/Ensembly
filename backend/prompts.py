@@ -44,9 +44,15 @@ For each scene you must provide:
     angle, characters, or broad setting similarity.
   - scene_type: either "still" or "video". Default to "still". Mark a small \
     number of pivotal "hero" moments as "video" when motion would add real impact.
-  - characters: a list of named characters that appear in this scene (e.g. \
-    ["Zeus", "Theseus"]), or an empty list. Use consistent names across scenes so \
-    the pipeline can lock character identity with reference images.
+  - characters: a list of named characters that appear in this scene. Each entry \
+    must include name, state, state_importance, and state_notes. Use consistent \
+    names across scenes so the pipeline can lock character identity with reference \
+    images. Leave state empty and state_importance as "default" for ordinary \
+    appearances. Use a non-empty state ONLY for major identity/form differences \
+    that need a different reference image, such as pre-curse vs post-curse, human \
+    disguise vs divine/monster form, child vs adult, living vs undead, or a mortal \
+    version vs transformed version. Do NOT use state for clothing, armor, pose, \
+    mood, lighting, temporary wounds, hairstyles, props, or scene-specific styling.
 
 Pace the total narration to fit the target duration the user provides \
 (assume roughly 2.5 spoken words per second). Also produce social metadata for \
@@ -86,7 +92,9 @@ def build_script_prompt(
         "scene content, mood, composition, lighting, and framing. Do not include "
         "art style words because image/video style is applied separately from "
         "the content preset. When a scene includes characters, put their exact "
-        "names and clear actions/positions in the image_prompt. For each scene, "
+        "names and clear actions/positions in the image_prompt. In characters, "
+        "leave state empty unless this scene needs a major identity/form state "
+        "with its own reference sheet. For each scene, "
         "fill continuity_context with explicit earlier source_scene references "
         "ONLY when an earlier image is truly needed to preserve a specific "
         "object, place, artifact, costume detail, symbol, vehicle, or environment. "
@@ -120,7 +128,23 @@ SCRIPT_JSON_SCHEMA: dict = {
                         },
                     },
                     "scene_type": {"type": "string", "enum": ["still", "video"]},
-                    "characters": {"type": "array", "items": {"type": "string"}},
+                    "characters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "state": {"type": "string"},
+                                "state_importance": {
+                                    "type": "string",
+                                    "enum": ["default", "major_identity_change", "ambiguous"],
+                                },
+                                "state_notes": {"type": "string"},
+                            },
+                            "required": ["name", "state", "state_importance", "state_notes"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": ["narration_text", "image_prompt", "continuity_context", "scene_type", "characters"],
                 "additionalProperties": False,

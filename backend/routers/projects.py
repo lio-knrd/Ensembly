@@ -11,7 +11,7 @@ from ..adapters.registry import tts_voice_label
 from .. import pipeline
 from ..config import settings
 from ..database import get_session
-from ..models import Character, ContentPreset, Project, ProjectCharacter, Scene, SceneType, Stage
+from ..models import Character, CharacterForm, ContentPreset, Project, ProjectCharacter, Scene, SceneType, Stage
 from ..schemas import CastSheetGenerate, ProjectCreate, ProjectDetail, SceneUpdate
 from .common import (
     default_content_preset,
@@ -70,7 +70,13 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
     char_ids = session.exec(
         select(ProjectCharacter.character_id).where(ProjectCharacter.project_id == project_id)
     ).all()
-    characters = [session.get(Character, cid).model_dump() for cid in char_ids if session.get(Character, cid)]
+    characters = []
+    for cid in char_ids:
+        char = session.get(Character, cid)
+        if not char:
+            continue
+        forms = session.exec(select(CharacterForm).where(CharacterForm.character_id == cid)).all()
+        characters.append({**char.model_dump(), "forms": [f.model_dump() for f in forms]})
     project_data = project.model_dump()
     project_data["voice_name"] = tts_voice_label(None)
     project_data["voice_id"] = ""
@@ -150,6 +156,7 @@ def generate_cast_sheet(project_id: str, body: CastSheetGenerate, session: Sessi
         body.description,
         body.prompt,
         body.generate_description,
+        body.state,
     )
     return {"ok": True}
 

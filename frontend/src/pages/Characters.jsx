@@ -9,7 +9,8 @@ export default function Characters() {
     queryKey: ["characters"],
     queryFn: api.listCharacters,
   });
-  const readyCount = characters.filter((c) => c.reference_image_path).length;
+  const readyCount = characters.filter((c) => defaultForm(c)?.reference_image_path || c.reference_image_path).length;
+  const formCount = characters.reduce((sum, c) => sum + formsFor(c).length, 0);
 
   return (
     <>
@@ -19,7 +20,8 @@ export default function Characters() {
           <p>Global character sheets used by projects for identity consistency.</p>
           <div className="character-stats">
             <span>{characters.length} characters</span>
-            <span>{readyCount} sheets ready</span>
+            <span>{formCount} forms</span>
+            <span>{readyCount} default sheets ready</span>
           </div>
         </div>
         <button className="btn primary" onClick={() => setShowNew(true)}>
@@ -35,7 +37,7 @@ export default function Characters() {
           <span>Add one to create a reusable reference sheet.</span>
         </div>
       ) : (
-        <div className="character-grid">
+        <div className="character-list">
           {characters.map((c) => (
             <CharacterCard key={c.id} character={c} />
           ))}
@@ -60,14 +62,23 @@ function CharacterCard({ character }) {
     onSuccess: invalidate,
   });
 
-  const img = mediaUrl(character.reference_image_path, character.reference_version);
-  const hasSheet = Boolean(character.reference_image_path);
+  const forms = formsFor(character);
+  const primaryForm = defaultForm(character);
+  const img = mediaUrl(
+    primaryForm?.reference_image_path || character.reference_image_path,
+    primaryForm?.reference_version ?? character.reference_version
+  );
+  const hasSheet = Boolean(primaryForm?.reference_image_path || character.reference_image_path);
   const hasDescription = Boolean(character.description?.trim());
-  const styleText = character.reference_style_prompt?.trim();
-  const promptText = character.reference_prompt?.trim();
+  const styleText = (primaryForm?.reference_style_prompt || character.reference_style_prompt || "").trim();
+  const promptText = (primaryForm?.reference_prompt || character.reference_prompt || "").trim();
+  const variantCount = [
+    ...(character.variant_paths || []),
+    ...forms.flatMap((form) => form.variant_paths || []),
+  ].length;
   const sheetButtonText = hasSheet
-    ? "Regenerate character sheet from description"
-    : "Generate character sheet from description";
+    ? "Regenerate default sheet"
+    : "Generate default sheet";
 
   return (
     <div className="char-card">
@@ -79,7 +90,7 @@ function CharacterCard({ character }) {
           {!img && <span>No sheet</span>}
         </div>
         <div className={"char-sheet-state " + (hasSheet ? "ready" : "missing")}>
-          {hasSheet ? "Sheet ready" : "Missing sheet"}
+          {hasSheet ? "Default ready" : "No default"}
         </div>
       </div>
 
@@ -88,8 +99,7 @@ function CharacterCard({ character }) {
           <div>
             <h3>{character.name}</h3>
             <div className="char-used">
-              Used in {character.used_in_projects} project
-              {character.used_in_projects === 1 ? "" : "s"}
+              {character.used_in_projects} project{character.used_in_projects === 1 ? "" : "s"} / {forms.length} form{forms.length === 1 ? "" : "s"} / {variantCount} variant{variantCount === 1 ? "" : "s"}
             </div>
           </div>
           <button className="btn sm" onClick={() => setEditing(true)}>
@@ -99,9 +109,15 @@ function CharacterCard({ character }) {
 
         <p className="char-description">{character.description || "No description yet."}</p>
 
+        <div className="char-forms">
+          {forms.map((form) => (
+            <FormPill key={form.id} form={form} />
+          ))}
+        </div>
+
         <div className="char-sheet-meta">
           <div>
-            <span>Generated style</span>
+            <span>Default style</span>
             <strong title={styleText || ""}>
               {styleText || (hasSheet ? "No stored style" : "None yet")}
             </strong>
@@ -120,7 +136,7 @@ function CharacterCard({ character }) {
 
         <div className="char-actions">
           <button
-            className="btn primary"
+            className="btn"
             disabled={regen.isPending || !hasDescription}
             onClick={() => regen.mutate()}
             title={!hasDescription ? "Add a description before generating a sheet." : undefined}
@@ -148,6 +164,53 @@ function CharacterCard({ character }) {
       )}
     </div>
   );
+}
+
+function FormPill({ form }) {
+  const img = mediaUrl(form.reference_image_path, form.reference_version);
+  const label = form.is_default ? "Default" : form.name || form.state || "Form";
+  const detail = form.state || form.description || "";
+  const variants = form.variant_paths?.length || 0;
+
+  return (
+    <div className={"char-form-pill" + (form.reference_image_path ? " ready" : " missing")}>
+      <div
+        className="char-form-thumb"
+        style={img ? { backgroundImage: `url(${img})` } : undefined}
+      >
+        {!img && "No ref"}
+      </div>
+      <div className="char-form-copy">
+        <strong>{label}</strong>
+        <span title={detail}>{detail || (form.is_default ? "Standard appearance" : "No notes")}</span>
+      </div>
+      <em>{variants} variant{variants === 1 ? "" : "s"}</em>
+    </div>
+  );
+}
+
+function formsFor(character) {
+  const forms = character.forms?.length
+    ? character.forms
+    : [
+        {
+          id: `${character.id}-default`,
+          name: "Default",
+          state: "",
+          description: character.description || "",
+          reference_image_path: character.reference_image_path,
+          reference_prompt: character.reference_prompt,
+          reference_style_prompt: character.reference_style_prompt,
+          reference_version: character.reference_version,
+          variant_paths: character.variant_paths || [],
+          is_default: true,
+        },
+      ];
+  return [...forms].sort((a, b) => Number(b.is_default) - Number(a.is_default) || (a.name || "").localeCompare(b.name || ""));
+}
+
+function defaultForm(character) {
+  return formsFor(character).find((form) => form.is_default) || formsFor(character)[0];
 }
 
 function CharacterModal({ character, onClose }) {

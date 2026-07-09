@@ -11,7 +11,7 @@ from ..adapters import get_image_generator
 from ..config import settings
 from ..database import get_session
 from ..events import bus
-from ..models import Character, ProjectCharacter, Scene
+from ..models import Character, CharacterForm, ProjectCharacter, Scene
 from ..schemas import CharacterCreate, CharacterUpdate
 from ..storage import character_folder
 
@@ -31,7 +31,51 @@ def _usage_count(session: Session, character_id: str) -> int:
 
 
 def _serialize(session: Session, char: Character) -> dict:
-    return {**char.model_dump(), "used_in_projects": _usage_count(session, char.id)}
+    forms = session.exec(
+        select(CharacterForm).where(CharacterForm.character_id == char.id).order_by(CharacterForm.is_default.desc(), CharacterForm.name)
+    ).all()
+    return {
+        **char.model_dump(),
+        "forms": [f.model_dump() for f in forms],
+        "used_in_projects": _usage_count(session, char.id),
+    }
+
+
+def _default_form(session: Session, char: Character) -> CharacterForm:
+    form = session.exec(
+        select(CharacterForm).where(
+            CharacterForm.character_id == char.id,
+            CharacterForm.is_default == True,  # noqa: E712
+        )
+    ).first()
+    if form:
+        return form
+    form = CharacterForm(
+        character_id=char.id,
+        name="Default",
+        description=char.description,
+        reference_image_path=char.reference_image_path,
+        reference_prompt=char.reference_prompt,
+        reference_style_prompt=char.reference_style_prompt,
+        reference_version=char.reference_version,
+        variant_paths=char.variant_paths,
+        is_default=True,
+    )
+    session.add(form)
+    session.commit()
+    session.refresh(form)
+    return form
+
+
+def _sync_default_form(session: Session, char: Character) -> None:
+    form = _default_form(session, char)
+    form.description = char.description
+    form.reference_image_path = char.reference_image_path
+    form.reference_prompt = char.reference_prompt
+    form.reference_style_prompt = char.reference_style_prompt
+    form.reference_version = char.reference_version
+    form.variant_paths = char.variant_paths
+    session.add(form)
 
 
 def _project_ids(session: Session, character_id: str) -> list[str]:
@@ -56,6 +100,7 @@ def create_character(body: CharacterCreate, session: Session = Depends(get_sessi
     session.add(char)
     session.commit()
     session.refresh(char)
+    _default_form(session, char)
 
     folder = character_folder(char.name)
     if body.generate_reference and char.description:
@@ -70,6 +115,7 @@ def create_character(body: CharacterCreate, session: Session = Depends(get_sessi
             char.reference_style_prompt = ""
             char.reference_version = (char.reference_version or 0) + 1
             session.add(char)
+            _sync_default_form(session, char)
             session.commit()
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Reference image generation failed: {exc}")
@@ -87,6 +133,7 @@ def update_character(character_id: str, body: CharacterUpdate, session: Session 
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(char, field, value)
     session.add(char)
+    _sync_default_form(session, char)
     session.commit()
     _write_metadata(character_folder(char.name), char)
     _publish_character(session, char)
@@ -110,6 +157,8 @@ def delete_character(character_id: str, session: Session = Depends(get_session))
         select(ProjectCharacter).where(ProjectCharacter.character_id == character_id)
     ):
         session.delete(link)
+    for form in session.exec(select(CharacterForm).where(CharacterForm.character_id == character_id)):
+        session.delete(form)
     session.delete(char)
     session.commit()
     bus.publish("character.deleted", character_id=character_id, project_ids=project_ids)
@@ -131,6 +180,7 @@ async def upload_reference(
     char.reference_style_prompt = ""
     char.reference_version = (char.reference_version or 0) + 1
     session.add(char)
+    _sync_default_form(session, char)
     session.commit()
     _write_metadata(folder, char)
     _publish_character(session, char)
@@ -156,6 +206,7 @@ def regenerate_reference(character_id: str, session: Session = Depends(get_sessi
     char.reference_style_prompt = ""
     char.reference_version = (char.reference_version or 0) + 1
     session.add(char)
+    _sync_default_form(session, char)
     session.commit()
     _write_metadata(folder, char)
     _publish_character(session, char)

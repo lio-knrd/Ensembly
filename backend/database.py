@@ -19,6 +19,8 @@ _ADDED_COLUMNS = [
     ("scenes", "asset_version", "INTEGER DEFAULT 0"),
     ("scenes", "continuity_context", "JSON DEFAULT '[]'"),
     ("scenes", "excluded_context_scene_ids", "JSON DEFAULT '[]'"),
+    ("scenes", "character_assignments", "JSON DEFAULT '[]'"),
+    ("scenes", "use_next_scene_as_end_frame", "BOOLEAN DEFAULT 1"),
     ("projects", "failed_stage", "TEXT DEFAULT NULL"),
     ("projects", "cancel_requested", "BOOLEAN DEFAULT 0"),
     ("projects", "canceled_stage", "TEXT DEFAULT NULL"),

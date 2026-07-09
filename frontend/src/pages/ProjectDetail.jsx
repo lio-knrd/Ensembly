@@ -78,13 +78,14 @@ export default function ProjectDetail() {
       )}
 
       <div className="scenes">
-        {scenes.map((s) => (
+        {scenes.map((s, index) => (
           <SceneCard
             key={s.id}
             projectId={id}
             scene={s}
             stage={project.stage}
             visualStyle={visualStyle}
+            hasNextScene={index < scenes.length - 1}
           />
         ))}
       </div>
@@ -317,7 +318,7 @@ function CastPanel({ project, visualStyle }) {
       {cast.length > 0 && (
         <div className="cast-grid">
           {cast.map((c) => (
-            <CastCard key={c.name} projectId={id} member={c} onDone={invalidate} busy={busy} />
+            <CastCard key={c.key || `${c.name}-${c.state || "default"}`} projectId={id} member={c} onDone={invalidate} busy={busy} />
           ))}
         </div>
       )}
@@ -331,6 +332,7 @@ function CastCard({ projectId, member, onDone, busy }) {
     mutationFn: () =>
       api.generateCastSheet(projectId, {
         name: member.name,
+        state: member.state || "",
         description: description.trim() || null,
         generate_description: !description.trim(),
       }),
@@ -348,13 +350,20 @@ function CastCard({ projectId, member, onDone, busy }) {
       </div>
       <div className="cast-info">
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <h4>{member.name}</h4>
+          <h4>{member.state ? `${member.name} / ${member.state}` : member.name}</h4>
           {member.has_sheet ? (
             <span className="tag">ready</span>
           ) : (
             <span className="cast-missing-tag">no sheet</span>
           )}
         </div>
+        {member.state && (
+          <div className="form-note">
+            {member.missing_form
+              ? "Special form requested by the script"
+              : `Form: ${member.form_name || member.state}`}
+          </div>
+        )}
         <textarea
           value={description}
           placeholder="Appearance notes — leave blank to let the AI describe"
@@ -621,7 +630,7 @@ function FinalPanel({ project, metadata }) {
   );
 }
 
-function SceneCard({ projectId, scene, stage, visualStyle }) {
+function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
   const qc = useQueryClient();
   const invalidate = () => qc.invalidateQueries({ queryKey: ["project", projectId] });
 
@@ -773,6 +782,22 @@ function SceneCard({ projectId, scene, stage, visualStyle }) {
               Video
             </button>
           </div>
+          {scene.scene_type === "video" && hasNextScene && (
+            <label
+              className="scene-end-frame-toggle"
+              title="Use the following scene's picture as the final frame of this generated clip"
+            >
+              <input
+                type="checkbox"
+                checked={scene.use_next_scene_as_end_frame !== false}
+                disabled={save.isPending || busy}
+                onChange={(e) =>
+                  save.mutate({ use_next_scene_as_end_frame: e.target.checked })
+                }
+              />
+              End on next scene picture
+            </label>
+          )}
           {scene.duration_seconds != null && (
             <span>{scene.duration_seconds.toFixed(1)}s</span>
           )}
