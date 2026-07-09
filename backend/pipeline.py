@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import traceback
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,26 @@ _executor = ThreadPoolExecutor(max_workers=2)
 _jobs_by_project: dict[str, set[Future]] = {}
 _jobs_lock = Lock()
 _MAX_VIDEO_PROMPT_CHARS = 2400
+
+
+def _candidate_path(folder: Path, subfolder: str, stem: str, suffix: str) -> Path:
+    """Return a collision-free path so regeneration never overwrites a candidate."""
+    return folder / subfolder / f"{stem}_{uuid.uuid4().hex[:10]}{suffix}"
+
+
+def _paths_with(paths: list[str] | None, *candidates: str | None) -> list[str]:
+    result = list(paths or [])
+    for candidate in candidates:
+        if candidate and candidate not in result:
+            result.append(candidate)
+    return result
+
+
+def _audio_options_with(options: list[dict] | None, candidate: dict) -> list[dict]:
+    result = list(options or [])
+    result = [item for item in result if item.get("path") != candidate.get("path")]
+    result.append(candidate)
+    return result
 
 def submit(fn, *args) -> None:
     """Enqueue a pipeline step to run off the request thread."""
@@ -680,6 +701,10 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
                 "reference_version": form.reference_version if form else 0,
                 "reference_prompt": form.reference_prompt if form else "",
                 "reference_style_prompt": form.reference_style_prompt if form else "",
+                "reference_variants": _paths_with(
+                    form.reference_variants if form else [],
+                    form.reference_image_path if form else None,
+                ),
             })
         else:
             # Suggested-but-not-yet-created character.
@@ -700,6 +725,7 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
                 "reference_version": 0,
                 "reference_prompt": "",
                 "reference_style_prompt": "",
+                "reference_variants": [],
             })
     return cast
 
@@ -787,11 +813,17 @@ def generate_character_sheet(
         try:
             folder = character_folder(char.name)
             (folder / "forms").mkdir(parents=True, exist_ok=True)
-            out_name = "reference.png" if not state else f"forms/{slugify(state)}.png"
-            out = get_image_generator().generate(ref_prompt, folder / out_name, None)
+            stem = "reference" if not state else slugify(state)
+            subfolder = "variants" if not state else "forms"
+            out_path = _candidate_path(folder, subfolder, stem, ".png")
+            previous = form.reference_image_path
+            out = get_image_generator().generate(ref_prompt, out_path, None)
             if _stop_if_canceled(session, project):
                 return
             form.reference_image_path = _rel(out)
+            form.reference_variants = _paths_with(
+                form.reference_variants, previous, form.reference_image_path
+            )
             form.reference_prompt = ref_prompt
             form.reference_style_prompt = style
             form.reference_version = (form.reference_version or 0) + 1
@@ -800,6 +832,7 @@ def generate_character_sheet(
                 char.reference_prompt = form.reference_prompt
                 char.reference_style_prompt = form.reference_style_prompt
                 char.reference_version = form.reference_version
+                char.reference_variants = form.reference_variants
             session.add(char)
             session.add(form)
             session.commit()
@@ -961,6 +994,14 @@ def generate_audio(project_id: str) -> None:
                 scene.audio_path = _rel(audio_out)
                 scene.timestamps_path = _rel(ts_out)
                 scene.duration_seconds = result.duration_seconds
+                scene.audio_variants = _audio_options_with(
+                    scene.audio_variants,
+                    {
+                        "path": scene.audio_path,
+                        "timestamps_path": scene.timestamps_path,
+                        "duration_seconds": scene.duration_seconds,
+                    },
+                )
                 scene.asset_version = (scene.asset_version or 0) + 1
                 scene.status = "ready"
                 session.add(scene)
@@ -1029,7 +1070,9 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
     continuity_refs = _scene_continuity_refs(session, project, scene)
     refs = [ref["path"] for ref in character_refs] + [ref["path"] for ref in continuity_refs]
 
-    out = folder / "images" / f"scene_{scene.order_index + 1:02d}.png"
+    out = _candidate_path(
+        folder, "images", f"scene_{scene.order_index + 1:02d}", ".png"
+    )
     ref_label = "style reference image" if getattr(img, "name", "") == "krea" else "reference image panel"
     prompt = _apply_continuity_context(
         _apply_character_context(
@@ -1044,7 +1087,11 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
     result = img.generate(prompt, out, refs or None)
     if _stop_if_canceled(session, project):
         return False
+    previous = scene.image_path
     scene.image_path = _rel(result)
+    scene.image_variants = _paths_with(
+        scene.image_variants, previous, scene.image_path
+    )
     scene.status = "ready"
     scene.asset_version = (scene.asset_version or 0) + 1
     session.add(scene)
@@ -1316,7 +1363,9 @@ def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> b
     session.add(scene)
     session.commit()
     image_abs = Path(settings.projects_dir.parent.parent) / scene.image_path
-    out = folder / "clips" / f"scene_{scene.order_index + 1:02d}.mp4"
+    out = _candidate_path(
+        folder, "clips", f"scene_{scene.order_index + 1:02d}", ".mp4"
+    )
     duration = scene.duration_seconds or 3.0
     character_refs = _scene_character_refs(session, scene)
     element_limit = getattr(vid, "_MAX_ELEMENTS", len(character_refs))
@@ -1336,7 +1385,11 @@ def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> b
     )
     if _stop_if_canceled(session, project):
         return False
+    previous = scene.clip_path
     scene.clip_path = _rel(result)
+    scene.clip_variants = _paths_with(
+        scene.clip_variants, previous, scene.clip_path
+    )
     scene.asset_version = (scene.asset_version or 0) + 1
     scene.status = "ready"
     session.add(scene)
@@ -1386,6 +1439,11 @@ def render(project_id: str) -> None:
             captions = ffmpeg.build_ass_captions(timeline, folder / "final" / "captions.ass")
 
             narration = folder / "audio" / "full_narration.mp3"
+            # The selected take may have changed since the last TTS generation.
+            ffmpeg.concat_audio(
+                [root / scene.audio_path for scene in scenes if scene.audio_path],
+                narration,
+            )
             music_path = None
             music_track = None
             if project.music_enabled and project.music_track_id:
@@ -1482,14 +1540,37 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
             session.add(scene)
             session.commit()
             tts = get_tts_generator(_content_voice_id(session, project))
-            audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
-            ts_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.timestamps.json"
+            previous = (
+                {
+                    "path": scene.audio_path,
+                    "timestamps_path": scene.timestamps_path,
+                    "duration_seconds": scene.duration_seconds,
+                }
+                if scene.audio_path
+                else None
+            )
+            audio_out = _candidate_path(
+                folder, "audio", f"scene_{scene.order_index + 1:02d}", ".mp3"
+            )
+            ts_out = audio_out.with_suffix(".timestamps.json")
             result = tts.synthesize(scene.narration_text, audio_out, ts_out)
             if _stop_if_canceled(session, project):
                 return
             scene.audio_path = _rel(audio_out)
             scene.timestamps_path = _rel(ts_out)
             scene.duration_seconds = result.duration_seconds
+            if previous:
+                scene.audio_variants = _audio_options_with(
+                    scene.audio_variants, previous
+                )
+            scene.audio_variants = _audio_options_with(
+                scene.audio_variants,
+                {
+                    "path": scene.audio_path,
+                    "timestamps_path": scene.timestamps_path,
+                    "duration_seconds": scene.duration_seconds,
+                },
+            )
             scene.asset_version = (scene.asset_version or 0) + 1
             scene.status = "ready"
             session.add(scene)
@@ -1507,6 +1588,25 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
         except Exception:  # noqa: BLE001
             if _stop_if_canceled(session, project):
                 return
+            traceback.print_exc()
+
+
+def rebuild_narration(project_id: str) -> None:
+    """Rebuild the project-wide narration from the currently selected takes."""
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            return
+        ordered = session.exec(
+            select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
+        ).all()
+        root = Path(settings.projects_dir.parent.parent)
+        try:
+            ffmpeg.concat_audio(
+                [root / scene.audio_path for scene in ordered if scene.audio_path],
+                _folder(project) / "audio" / "full_narration.mp3",
+            )
+        except Exception:  # noqa: BLE001
             traceback.print_exc()
 
 

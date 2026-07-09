@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
 import Modal from "../components/Modal.jsx";
@@ -54,31 +54,71 @@ function CharacterCard({ character }) {
   const [editing, setEditing] = useState(false);
   const fileRef = useRef();
   const invalidate = () => qc.invalidateQueries({ queryKey: ["characters"] });
+  const forms = formsFor(character);
+  const fallbackForm = defaultForm(character);
+  const [selectedFormId, setSelectedFormId] = useState(fallbackForm?.id || "");
+  const selectedForm =
+    forms.find((form) => form.id === selectedFormId) || fallbackForm;
+
+  useEffect(() => {
+    if (!forms.some((form) => form.id === selectedFormId)) {
+      setSelectedFormId(fallbackForm?.id || "");
+    }
+  }, [forms, fallbackForm, selectedFormId]);
 
   const del = useMutation({ mutationFn: () => api.deleteCharacter(character.id), onSuccess: invalidate });
-  const regen = useMutation({ mutationFn: () => api.regenReference(character.id), onSuccess: invalidate });
+  const regen = useMutation({
+    mutationFn: () =>
+      selectedForm?.id && !selectedForm.id.endsWith("-default")
+        ? api.regenFormReference(character.id, selectedForm.id)
+        : api.regenReference(character.id),
+    onSuccess: invalidate,
+  });
+  const selectSheet = useMutation({
+    mutationFn: (path) =>
+      api.selectReference(character.id, {
+        path,
+        form_id:
+          selectedForm?.id && !selectedForm.id.endsWith("-default")
+            ? selectedForm.id
+            : null,
+      }),
+    onSuccess: invalidate,
+  });
   const upload = useMutation({
-    mutationFn: (file) => api.uploadReference(character.id, file),
+    mutationFn: (file) =>
+      selectedForm?.id && !selectedForm.id.endsWith("-default")
+        ? api.uploadFormReference(character.id, selectedForm.id, file)
+        : api.uploadReference(character.id, file),
     onSuccess: invalidate,
   });
 
-  const forms = formsFor(character);
-  const primaryForm = defaultForm(character);
   const img = mediaUrl(
-    primaryForm?.reference_image_path || character.reference_image_path,
-    primaryForm?.reference_version ?? character.reference_version
+    selectedForm?.reference_image_path,
+    selectedForm?.reference_version
   );
-  const hasSheet = Boolean(primaryForm?.reference_image_path || character.reference_image_path);
-  const hasDescription = Boolean(character.description?.trim());
-  const styleText = (primaryForm?.reference_style_prompt || character.reference_style_prompt || "").trim();
-  const promptText = (primaryForm?.reference_prompt || character.reference_prompt || "").trim();
-  const variantCount = [
-    ...(character.variant_paths || []),
-    ...forms.flatMap((form) => form.variant_paths || []),
-  ].length;
+  const hasSheet = Boolean(selectedForm?.reference_image_path);
+  const descriptionText = (selectedForm?.description || character.description || "").trim();
+  const hasDescription = Boolean(descriptionText);
+  const styleText = (selectedForm?.reference_style_prompt || "").trim();
+  const promptText = (selectedForm?.reference_prompt || "").trim();
+  const formLabel = selectedForm?.is_default
+    ? "Default"
+    : selectedForm?.name || selectedForm?.state || "Form";
+  const allVariantPaths = Array.from(new Set([
+    ...(character.reference_variants || []),
+    ...forms.flatMap((form) => form.reference_variants || []),
+  ]));
+  const selectedVariants = Array.from(new Set([
+    ...(selectedForm?.reference_variants || []),
+    ...(selectedForm?.reference_image_path
+      ? [selectedForm.reference_image_path]
+      : []),
+  ]));
+  const variantCount = allVariantPaths.length;
   const sheetButtonText = hasSheet
-    ? "Regenerate default sheet"
-    : "Generate default sheet";
+    ? `Regenerate ${formLabel}`
+    : `Generate ${formLabel}`;
 
   return (
     <div className="char-card">
@@ -90,8 +130,24 @@ function CharacterCard({ character }) {
           {!img && <span>No sheet</span>}
         </div>
         <div className={"char-sheet-state " + (hasSheet ? "ready" : "missing")}>
-          {hasSheet ? "Default ready" : "No default"}
+          {hasSheet ? `${formLabel} ready` : `No ${formLabel} sheet`}
         </div>
+        {selectedVariants.length > 1 && (
+          <div className="sheet-variant-list char-sheet-variants">
+            {selectedVariants.map((path, index) => (
+              <button
+                type="button"
+                key={path}
+                className={"sheet-variant" + (path === selectedForm?.reference_image_path ? " active" : "")}
+                disabled={selectSheet.isPending || path === selectedForm?.reference_image_path}
+                onClick={() => selectSheet.mutate(path)}
+                title={`${formLabel} sheet version ${index + 1}`}
+              >
+                <img src={mediaUrl(path)} alt="" />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="char-body">
@@ -99,7 +155,7 @@ function CharacterCard({ character }) {
           <div>
             <h3>{character.name}</h3>
             <div className="char-used">
-              {character.used_in_projects} project{character.used_in_projects === 1 ? "" : "s"} / {forms.length} form{forms.length === 1 ? "" : "s"} / {variantCount} variant{variantCount === 1 ? "" : "s"}
+              {character.used_in_projects} project{character.used_in_projects === 1 ? "" : "s"} / {forms.length} form{forms.length === 1 ? "" : "s"} / {variantCount} sheet version{variantCount === 1 ? "" : "s"}
             </div>
           </div>
           <button className="btn sm" onClick={() => setEditing(true)}>
@@ -107,27 +163,36 @@ function CharacterCard({ character }) {
           </button>
         </div>
 
-        <p className="char-description">{character.description || "No description yet."}</p>
+        <p className="char-description">
+          {descriptionText || `No description for ${formLabel} yet.`}
+        </p>
 
         <div className="char-forms">
           {forms.map((form) => (
-            <FormPill key={form.id} form={form} />
+            <FormPill
+              key={form.id}
+              form={form}
+              selected={form.id === selectedForm?.id}
+              onSelect={() => setSelectedFormId(form.id)}
+            />
           ))}
         </div>
 
         <div className="char-sheet-meta">
           <div>
-            <span>Default style</span>
+            <span>{formLabel} style</span>
             <strong title={styleText || ""}>
               {styleText || (hasSheet ? "No stored style" : "None yet")}
             </strong>
           </div>
           <div>
-            <span>Sheet prompt source</span>
-            <strong title={promptText || ""}>
-              {promptText ? "Saved generation prompt" : "Character description"}
-            </strong>
+            <span>Selected form</span>
+            <strong>{formLabel}</strong>
           </div>
+        </div>
+        <div className="char-prompt">
+          <span>Generation prompt</span>
+          <p>{promptText || "No saved prompt yet — the form description will be used."}</p>
         </div>
 
         {regen.isError && <div className="banner compact">{String(regen.error.message)}</div>}
@@ -166,14 +231,23 @@ function CharacterCard({ character }) {
   );
 }
 
-function FormPill({ form }) {
+function FormPill({ form, selected, onSelect }) {
   const img = mediaUrl(form.reference_image_path, form.reference_version);
   const label = form.is_default ? "Default" : form.name || form.state || "Form";
   const detail = form.state || form.description || "";
-  const variants = form.variant_paths?.length || 0;
+  const variants = form.reference_variants?.length || 0;
 
   return (
-    <div className={"char-form-pill" + (form.reference_image_path ? " ready" : " missing")}>
+    <button
+      type="button"
+      className={
+        "char-form-pill" +
+        (form.reference_image_path ? " ready" : " missing") +
+        (selected ? " selected" : "")
+      }
+      onClick={onSelect}
+      aria-pressed={selected}
+    >
       <div
         className="char-form-thumb"
         style={img ? { backgroundImage: `url(${img})` } : undefined}
@@ -184,8 +258,8 @@ function FormPill({ form }) {
         <strong>{label}</strong>
         <span title={detail}>{detail || (form.is_default ? "Standard appearance" : "No notes")}</span>
       </div>
-      <em>{variants} variant{variants === 1 ? "" : "s"}</em>
-    </div>
+      <em>{variants} version{variants === 1 ? "" : "s"}</em>
+    </button>
   );
 }
 
@@ -202,6 +276,7 @@ function formsFor(character) {
           reference_prompt: character.reference_prompt,
           reference_style_prompt: character.reference_style_prompt,
           reference_version: character.reference_version,
+          reference_variants: character.reference_variants || [],
           variant_paths: character.variant_paths || [],
           is_default: true,
         },

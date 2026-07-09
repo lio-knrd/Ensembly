@@ -76,6 +76,11 @@ export const api = {
     req(`/api/projects/${pid}/scenes/${sid}/regenerate-audio`, { method: "POST" }),
   regenSceneClip: (pid, sid) =>
     req(`/api/projects/${pid}/scenes/${sid}/regenerate-clip`, { method: "POST" }),
+  selectSceneAsset: (pid, sid, body) =>
+    req(`/api/projects/${pid}/scenes/${sid}/select-asset`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   // Characters
   listCharacters: () => req("/api/characters"),
@@ -86,10 +91,27 @@ export const api = {
   deleteCharacter: (id) => req(`/api/characters/${id}`, { method: "DELETE" }),
   regenReference: (id) =>
     req(`/api/characters/${id}/regenerate-reference`, { method: "POST" }),
+  regenFormReference: (id, formId) =>
+    req(`/api/characters/${id}/forms/${formId}/regenerate-reference`, { method: "POST" }),
+  selectReference: (id, body) =>
+    req(`/api/characters/${id}/select-reference`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   uploadReference: async (id, file) => {
     const fd = new FormData();
     fd.append("file", file);
     const res = await fetch(`/api/characters/${id}/reference`, {
+      method: "POST",
+      body: fd,
+    });
+    if (!res.ok) throw new Error("Upload failed");
+    return res.json();
+  },
+  uploadFormReference: async (id, formId, file) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/characters/${id}/forms/${formId}/reference`, {
       method: "POST",
       body: fd,
     });

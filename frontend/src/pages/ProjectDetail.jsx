@@ -338,15 +338,42 @@ function CastCard({ projectId, member, onDone, busy }) {
       }),
     onSuccess: onDone,
   });
+  const selectSheet = useMutation({
+    mutationFn: (path) =>
+      api.selectReference(member.character_id, {
+        path,
+        form_id: member.form_id || null,
+      }),
+    onSuccess: onDone,
+  });
   const thumb = mediaUrl(member.reference_image_path, member.reference_version);
+  const variants = member.reference_variants || [];
 
   return (
     <div className={"cast-card" + (member.has_sheet ? "" : " missing")}>
+      <div className="cast-sheet-column">
       <div
         className="cast-thumb"
         style={thumb ? { backgroundImage: `url(${thumb})` } : undefined}
       >
         {!thumb && "🗿"}
+      </div>
+        {variants.length > 1 && (
+          <div className="sheet-variant-list">
+            {variants.map((path, index) => (
+              <button
+                type="button"
+                key={path}
+                className={"sheet-variant" + (path === member.reference_image_path ? " active" : "")}
+                disabled={busy || selectSheet.isPending || path === member.reference_image_path}
+                onClick={() => selectSheet.mutate(path)}
+                title={`Sheet version ${index + 1}`}
+              >
+                <img src={mediaUrl(path)} alt="" />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="cast-info">
         <div className="row" style={{ justifyContent: "space-between" }}>
@@ -661,6 +688,11 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
     mutationFn: () => api.regenSceneClip(projectId, scene.id),
     onSuccess: invalidate,
   });
+  const selectAsset = useMutation({
+    mutationFn: ({ kind, path }) =>
+      api.selectSceneAsset(projectId, scene.id, { kind, path }),
+    onSuccess: invalidate,
+  });
 
   const mediaVersion = scene.asset_version || 0;
   const img = mediaUrl(scene.image_path, mediaVersion);
@@ -671,6 +703,9 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
   const contextRefs = scene.context_refs || [];
   const continuityContext = scene.continuity_context || [];
   const excludedContextIds = scene.excluded_context_scene_ids || [];
+  const imageVariants = scene.image_variants || [];
+  const clipVariants = scene.clip_variants || [];
+  const audioVariants = scene.audio_variants || [];
 
   const setContextExcluded = (sceneId, excluded) => {
     const next = excluded
@@ -681,17 +716,39 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
 
   return (
     <div className={"scene" + (scene.approved ? " approved" : "")}>
-      <div className="scene-visual">
-        <span className="scene-index">#{scene.order_index + 1}</span>
-        {busy ? (
-          <span className="spinner" />
-        ) : showClip ? (
-          <video src={clip} muted loop playsInline
-            onMouseOver={(e) => e.target.play()} onMouseOut={(e) => e.target.pause()} />
-        ) : img ? (
-          <img src={img} alt="" />
-        ) : (
-          "no image"
+      <div className="scene-preview-column">
+        <div className="scene-visual">
+          <span className="scene-index">#{scene.order_index + 1}</span>
+          {busy ? (
+            <span className="spinner" />
+          ) : showClip ? (
+            <video src={clip} muted loop playsInline
+              onMouseOver={(e) => e.target.play()} onMouseOut={(e) => e.target.pause()} />
+          ) : img ? (
+            <img src={img} alt="" />
+          ) : (
+            "no image"
+          )}
+        </div>
+        {imageVariants.length > 1 && (
+          <AssetVariants
+            label="Images"
+            kind="image"
+            paths={imageVariants}
+            activePath={scene.image_path}
+            pending={selectAsset.isPending || busy}
+            onSelect={(path) => selectAsset.mutate({ kind: "image", path })}
+          />
+        )}
+        {scene.scene_type === "video" && clipVariants.length > 1 && (
+          <AssetVariants
+            label="Clips"
+            kind="clip"
+            paths={clipVariants}
+            activePath={scene.clip_path}
+            pending={selectAsset.isPending || busy}
+            onSelect={(path) => selectAsset.mutate({ kind: "clip", path })}
+          />
         )}
       </div>
 
@@ -806,6 +863,25 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
           )}
         </div>
         {audio && <Waveform src={audio} />}
+        {audioVariants.length > 1 && (
+          <label className="audio-variant-select">
+            <span>Narration version</span>
+            <select
+              value={scene.audio_path || ""}
+              disabled={selectAsset.isPending || busy}
+              onChange={(e) =>
+                selectAsset.mutate({ kind: "audio", path: e.target.value })
+              }
+            >
+              {audioVariants.map((option, index) => (
+                <option key={option.path} value={option.path}>
+                  Version {index + 1}
+                  {option.path === scene.audio_path ? " (selected)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       <div className="scene-actions">
@@ -830,6 +906,40 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             Regen clip
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+function AssetVariants({ label, kind, paths, activePath, pending, onSelect }) {
+  return (
+    <div className="asset-variants">
+      <div className="asset-variants-head">
+        <span>{label}</span>
+        <small>{paths.length} versions</small>
+      </div>
+      <div className="asset-variant-list">
+        {paths.map((path, index) => {
+          const src = mediaUrl(path);
+          const active = path === activePath;
+          return (
+            <button
+              key={path}
+              type="button"
+              className={"asset-variant" + (active ? " active" : "")}
+              disabled={pending || active}
+              title={`${label} version ${index + 1}${active ? " (selected)" : ""}`}
+              onClick={() => onSelect(path)}
+            >
+              {kind === "clip" ? (
+                <video src={src} muted preload="metadata" />
+              ) : (
+                <img src={src} alt="" />
+              )}
+              <span>{index + 1}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

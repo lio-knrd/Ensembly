@@ -1,7 +1,7 @@
 """Request/response models for the REST API."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -57,6 +57,11 @@ class SceneUpdate(BaseModel):
     excluded_context_scene_ids: Optional[list[str]] = None
 
 
+class SceneAssetSelect(BaseModel):
+    kind: Literal["image", "clip", "audio"]
+    path: str
+
+
 # --- Characters ---
 class CharacterCreate(BaseModel):
     name: str
@@ -67,6 +72,11 @@ class CharacterCreate(BaseModel):
 class CharacterUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+
+
+class CharacterReferenceSelect(BaseModel):
+    path: str
+    form_id: Optional[str] = None
 
 
 # --- Presets ---

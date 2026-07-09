@@ -97,6 +97,11 @@ class Scene(SQLModel, table=True):
     timestamps_path: Optional[str] = None
     image_path: Optional[str] = None
     clip_path: Optional[str] = None
+    # Every generated candidate is retained. The singular paths above point at
+    # the currently selected candidates used by downstream pipeline stages.
+    image_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    clip_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    audio_variants: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     duration_seconds: Optional[float] = None
     asset_version: int = 0
     approved: bool = False
@@ -114,6 +119,9 @@ class Character(SQLModel, table=True):
     reference_prompt: str = ""
     reference_style_prompt: str = ""
     reference_version: int = 0
+    # Selectable generation history. `variant_paths` remains reserved for
+    # supplementary identity views passed to the video model.
+    reference_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     variant_paths: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 
@@ -130,6 +138,7 @@ class CharacterForm(SQLModel, table=True):
     reference_prompt: str = ""
     reference_style_prompt: str = ""
     reference_version: int = 0
+    reference_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     variant_paths: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     trigger_phrases: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     is_default: bool = False

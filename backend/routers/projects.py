@@ -12,7 +12,14 @@ from .. import pipeline
 from ..config import settings
 from ..database import get_session
 from ..models import Character, CharacterForm, ContentPreset, Project, ProjectCharacter, Scene, SceneType, Stage
-from ..schemas import CastSheetGenerate, ProjectCreate, ProjectDetail, SceneUpdate
+from ..schemas import (
+    CastSheetGenerate,
+    ProjectCreate,
+    ProjectDetail,
+    SceneAssetSelect,
+    SceneUpdate,
+)
+from ..events import bus
 from .common import (
     default_content_preset,
     default_platform_preset,
@@ -235,6 +242,7 @@ def update_scene(project_id: str, scene_id: str, body: SceneUpdate, session: Ses
         setattr(scene, field, value)
     session.add(scene)
     session.commit()
+    session.refresh(scene)
     project = session.get(Project, project_id)
     return _scene_payload(session, project, scene) if project else scene.model_dump()
 
@@ -262,6 +270,45 @@ def regen_clip(project_id: str, scene_id: str, session: Session = Depends(get_se
     return {"ok": True}
 
 
+@router.post("/{project_id}/scenes/{scene_id}/select-asset")
+def select_scene_asset(
+    project_id: str,
+    scene_id: str,
+    body: SceneAssetSelect,
+    session: Session = Depends(get_session),
+):
+    scene = _require_scene(session, project_id, scene_id)
+    project = _require(session, project_id)
+
+    if body.kind == "image":
+        options = _paths_with_current(scene.image_variants, scene.image_path)
+        if body.path not in options:
+            raise HTTPException(400, "Unknown image candidate")
+        scene.image_path = body.path
+    elif body.kind == "clip":
+        options = _paths_with_current(scene.clip_variants, scene.clip_path)
+        if body.path not in options:
+            raise HTTPException(400, "Unknown clip candidate")
+        scene.clip_path = body.path
+    else:
+        options = _audio_options(scene)
+        selected = next((item for item in options if item.get("path") == body.path), None)
+        if not selected:
+            raise HTTPException(400, "Unknown audio candidate")
+        scene.audio_path = selected["path"]
+        scene.timestamps_path = selected.get("timestamps_path")
+        scene.duration_seconds = selected.get("duration_seconds")
+
+    scene.asset_version = (scene.asset_version or 0) + 1
+    session.add(scene)
+    session.commit()
+    session.refresh(scene)
+    if body.kind == "audio":
+        pipeline.submit(pipeline.rebuild_narration, project_id)
+    bus.publish("scene.updated", project_id=project_id, scene_id=scene_id)
+    return _scene_payload(session, project, scene)
+
+
 def _require(session: Session, project_id: str) -> Project:
     project = session.get(Project, project_id)
     if not project:
@@ -278,6 +325,9 @@ def _require_scene(session: Session, project_id: str, scene_id: str) -> Scene:
 
 def _scene_payload(session: Session, project: Project, scene: Scene) -> dict:
     data = scene.model_dump()
+    data["image_variants"] = _paths_with_current(scene.image_variants, scene.image_path)
+    data["clip_variants"] = _paths_with_current(scene.clip_variants, scene.clip_path)
+    data["audio_variants"] = _audio_options(scene)
     refs = []
     for ref in pipeline.scene_context_refs(session, project, scene):
         refs.append({
@@ -293,3 +343,21 @@ def _scene_payload(session: Session, project: Project, scene: Scene) -> dict:
         })
     data["context_refs"] = refs
     return data
+
+
+def _paths_with_current(paths: list[str] | None, current: str | None) -> list[str]:
+    result = list(paths or [])
+    if current and current not in result:
+        result.append(current)
+    return result
+
+
+def _audio_options(scene: Scene) -> list[dict]:
+    result = list(scene.audio_variants or [])
+    if scene.audio_path and not any(item.get("path") == scene.audio_path for item in result):
+        result.append({
+            "path": scene.audio_path,
+            "timestamps_path": scene.timestamps_path,
+            "duration_seconds": scene.duration_seconds,
+        })
+    return result
