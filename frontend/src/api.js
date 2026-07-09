@@ -149,6 +149,37 @@ export const api = {
   deleteIdea: (id) => req(`/api/ideas/${id}`, { method: "DELETE" }),
   convertIdea: (id, body) =>
     req(`/api/ideas/${id}/convert`, { method: "POST", body: JSON.stringify(body) }),
+  listEditorialPlans: () => req("/api/ideas/plans"),
+  createEditorialPlan: (body) =>
+    req("/api/ideas/plans", { method: "POST", body: JSON.stringify(body) }),
+  getEditorialPlan: (id) => req(`/api/ideas/plans/${id}`),
+  updateEditorialPlan: (id, body) =>
+    req(`/api/ideas/plans/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteEditorialPlan: (id) => req(`/api/ideas/plans/${id}`, { method: "DELETE" }),
+  createEditorialItem: (planId, body) =>
+    req(`/api/ideas/plans/${planId}/items`, { method: "POST", body: JSON.stringify(body) }),
+  updateEditorialItem: (planId, itemId, body) =>
+    req(`/api/ideas/plans/${planId}/items/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteEditorialItem: (planId, itemId) =>
+    req(`/api/ideas/plans/${planId}/items/${itemId}`, { method: "DELETE" }),
+  reorderEditorialItems: (planId, itemIds) =>
+    req(`/api/ideas/plans/${planId}/reorder`, {
+      method: "POST",
+      body: JSON.stringify({ item_ids: itemIds }),
+    }),
+  suggestEditorialItems: (planId, body) =>
+    req(`/api/ideas/plans/${planId}/suggest`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  convertEditorialItem: (planId, itemId) =>
+    req(`/api/ideas/plans/${planId}/items/${itemId}/convert`, {
+      method: "POST",
+      body: JSON.stringify({ start: true }),
+    }),
 
   // Settings
   getSettings: () => req("/api/settings"),

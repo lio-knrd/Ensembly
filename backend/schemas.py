@@ -127,12 +127,73 @@ class IdeaIn(BaseModel):
     text: str
     target_duration_seconds: Optional[int] = None
     notes: Optional[str] = None
+    plan_id: Optional[str] = None
 
 
 class IdeaConvert(BaseModel):
     title: Optional[str] = None
     platform_preset_id: Optional[str] = None
     content_preset_id: Optional[str] = None
+    start: bool = True
+
+
+class EditorialPlanIn(BaseModel):
+    name: str
+    description: str = ""
+    editorial_rules: str = ""
+    ordering_mode: str = "custom"
+    parent_plan_id: Optional[str] = None
+    platform_preset_id: Optional[str] = None
+    content_preset_id: Optional[str] = None
+
+
+class EditorialPlanUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    editorial_rules: Optional[str] = None
+    ordering_mode: Optional[str] = None
+    parent_plan_id: Optional[str] = None
+    platform_preset_id: Optional[str] = None
+    content_preset_id: Optional[str] = None
+
+
+class EditorialItemIn(BaseModel):
+    title: str
+    summary: str = ""
+    coverage_summary: str = ""
+    notes: str = ""
+    status: str = "planned"
+    source_type: str = "manual"
+    target_duration_seconds: Optional[int] = None
+    project_id: Optional[str] = None
+    external_url: str = ""
+    part_group_id: Optional[str] = None
+    part_group_title: str = ""
+    part_number: Optional[int] = None
+
+
+class EditorialItemUpdate(BaseModel):
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    coverage_summary: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+    target_duration_seconds: Optional[int] = None
+    external_url: Optional[str] = None
+    part_group_title: Optional[str] = None
+    part_number: Optional[int] = None
+
+
+class EditorialSuggestIn(BaseModel):
+    instruction: str
+    count: int = 5
+
+
+class EditorialReorderIn(BaseModel):
+    item_ids: list[str]
+
+
+class EditorialItemConvert(BaseModel):
     start: bool = True
 
 

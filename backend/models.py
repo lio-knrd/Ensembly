@@ -211,4 +211,47 @@ class Idea(SQLModel, table=True):
     text: str
     target_duration_seconds: int = 75
     notes: Optional[str] = None
+    plan_id: Optional[str] = Field(default=None, foreign_key="editorial_plans.id", index=True)
     created_at: datetime = Field(default_factory=_now)
+
+
+class EditorialPlan(SQLModel, table=True):
+    """A reusable editorial context for an ordered body of work."""
+
+    __tablename__ = "editorial_plans"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    name: str
+    description: str = ""
+    editorial_rules: str = ""
+    ordering_mode: str = "custom"
+    parent_plan_id: Optional[str] = Field(default=None, foreign_key="editorial_plans.id", index=True)
+    platform_preset_id: Optional[str] = Field(default=None, foreign_key="platform_presets.id")
+    content_preset_id: Optional[str] = Field(default=None, foreign_key="content_presets.id")
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class EditorialItem(SQLModel, table=True):
+    """One planned, external, completed, or AI-suggested work in a plan."""
+
+    __tablename__ = "editorial_items"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    plan_id: str = Field(foreign_key="editorial_plans.id", index=True)
+    title: str
+    summary: str = ""
+    coverage_summary: str = ""
+    notes: str = ""
+    status: str = "planned"
+    source_type: str = "manual"
+    order_index: int = 0
+    target_duration_seconds: int = 75
+    project_id: Optional[str] = Field(default=None, foreign_key="projects.id")
+    external_url: str = ""
+    part_group_id: Optional[str] = Field(default=None, index=True)
+    part_group_title: str = ""
+    part_number: Optional[int] = None
+    ai_rationale: str = ""
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)

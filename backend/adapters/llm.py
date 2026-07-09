@@ -339,6 +339,174 @@ def _offline_scope_analysis(topic: str, title: str, target_duration_seconds: int
     }
 
 
+EDITORIAL_SUGGESTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overview": {"type": "string"},
+        "suggestions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "coverage_scope": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "part_group_title": {"type": "string"},
+                    "part_number": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    },
+                },
+                "required": [
+                    "title", "summary", "coverage_scope", "rationale",
+                    "part_group_title", "part_number",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["overview", "suggestions"],
+    "additionalProperties": False,
+}
+
+
+def suggest_editorial_items(
+    *,
+    plan_name: str,
+    description: str,
+    editorial_rules: str,
+    ordering_mode: str,
+    platform_prompt: str,
+    content_prompt: str,
+    existing_items: list[dict],
+    instruction: str,
+    count: int,
+) -> dict:
+    """Suggest the next works using compact coverage records, not full scripts."""
+    history = "\n".join(
+        (
+            f"{index + 1}. [{item.get('status', 'planned')}] {item.get('title', '')}\n"
+            f"   Summary: {item.get('summary', '') or '(none)'}\n"
+            f"   Covered: {item.get('coverage_summary', '') or '(not documented)'}\n"
+            f"   Parts: {item.get('part_group_title', '') or '-'} "
+            f"{item.get('part_number') or ''}"
+        )
+        for index, item in enumerate(existing_items)
+    ) or "(No works recorded yet.)"
+    prompt = f"""\
+You are an editorial planner. Propose the next {count} works for a general
+content series. Respect the plan's own ordering rules; do not assume chronology
+unless the rules request it.
+
+Plan: {plan_name}
+Purpose: {description or "(none)"}
+Ordering mode: {ordering_mode}
+Editorial rules:
+{editorial_rules or "(none)"}
+
+Platform guidance:
+{platform_prompt or "(none)"}
+
+Content guidance:
+{content_prompt or "(none)"}
+
+Works already suggested, planned, completed, published, skipped, or externally produced:
+{history}
+
+User request:
+{instruction.strip()}
+
+Avoid duplicating covered material. You may make a brief callback to prior work,
+but do not pitch it as new coverage. Find genuine gaps and logical next steps.
+If one proposed work cannot fit a normal short-form video without omitting
+essential steps, split only that work into exactly two consecutive suggestions.
+Give both the same non-empty part_group_title and part_number 1 and 2. Otherwise
+part_group_title must be empty and part_number null. Each coverage_scope must
+state precise start/end boundaries and what is deliberately left for later.
+Return only the structured response."""
+    try:
+        if settings.anthropic_api_key and settings.default_llm_provider != "openai":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            response = client.messages.create(
+                model=settings.anthropic_script_model,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+                output_config={"format": {"type": "json_schema", "schema": EDITORIAL_SUGGESTIONS_SCHEMA}},
+            )
+            text = next((b.text for b in response.content if b.type == "text"), "")
+            return _normalize_editorial_suggestions(_extract_json(text), count)
+        if settings.openai_api_key:
+            response = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.openai_script_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "editorial_suggestions",
+                            "schema": EDITORIAL_SUGGESTIONS_SCHEMA,
+                            "strict": True,
+                        },
+                    },
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            return _normalize_editorial_suggestions(
+                _extract_json(response.json()["choices"][0]["message"]["content"]),
+                count,
+            )
+    except Exception:  # noqa: BLE001 - offline planning remains available
+        pass
+    return _offline_editorial_suggestions(instruction, existing_items, count)
+
+
+def _normalize_editorial_suggestions(data: dict, count: int) -> dict:
+    suggestions = []
+    for raw in (data.get("suggestions") or [])[:max(1, min(count, 10))]:
+        title = str(raw.get("title", "")).strip()
+        if not title:
+            continue
+        part_number = raw.get("part_number")
+        try:
+            part_number = int(part_number) if part_number is not None else None
+        except (TypeError, ValueError):
+            part_number = None
+        suggestions.append({
+            "title": title[:120],
+            "summary": str(raw.get("summary", "")).strip(),
+            "coverage_scope": str(raw.get("coverage_scope", "")).strip(),
+            "rationale": str(raw.get("rationale", "")).strip(),
+            "part_group_title": str(raw.get("part_group_title", "")).strip(),
+            "part_number": part_number if part_number in (1, 2) else None,
+        })
+    return {"overview": str(data.get("overview", "")).strip(), "suggestions": suggestions}
+
+
+def _offline_editorial_suggestions(instruction: str, existing_items: list[dict], count: int) -> dict:
+    start = len(existing_items) + 1
+    subject = textwrap.shorten(instruction.strip(), width=70, placeholder="…") or "Next topic"
+    suggestions = [
+        {
+            "title": f"{subject} — Idea {start + index}",
+            "summary": f"A focused next entry responding to: {subject}",
+            "coverage_scope": "Define the precise coverage boundary before production.",
+            "rationale": "Offline placeholder; configure an LLM provider for context-aware planning.",
+            "part_group_title": "",
+            "part_number": None,
+        }
+        for index in range(max(1, min(count, 10)))
+    ]
+    return {
+        "overview": "Offline planning suggestions generated without an LLM provider.",
+        "suggestions": suggestions,
+    }
+
+
 def ai_character_description(name: str, topic: str, content_prompt: str) -> str:
     """One-line appearance description for a character reference sheet.
 

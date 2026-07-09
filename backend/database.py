@@ -32,6 +32,7 @@ _ADDED_COLUMNS = [
     ("projects", "music_track_id", "TEXT DEFAULT NULL"),
     ("projects", "music_enabled", "BOOLEAN DEFAULT 1"),
     ("projects", "music_volume", "REAL DEFAULT 0.075"),
+    ("ideas", "plan_id", "TEXT DEFAULT NULL"),
 ]
 
 # check_same_thread=False so background tasks (different thread) can use sessions.
