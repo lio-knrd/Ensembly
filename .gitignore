@@ -9,9 +9,11 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# App data (generated media + sqlite db)
-/data/
-!/data/.gitkeep
+# App data (generated media + sqlite db); keep the bundled soundtrack.
+/data/*
+!/data/music/
+/data/music/*
+!/data/music/whisper-in-the-deep.mp3
 
 # Node / frontend
 frontend/node_modules/

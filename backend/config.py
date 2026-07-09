@@ -66,6 +66,10 @@ class Settings(BaseModel):
     elevenlabs_model: str = "eleven_multilingual_v2"
 
     @property
+    def root_dir(self) -> Path:
+        return ROOT_DIR
+
+    @property
     def db_file(self) -> Path:
         """Filesystem path of the SQLite db (derived from database_url)."""
         url = self.database_url

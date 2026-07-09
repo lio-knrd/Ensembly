@@ -30,6 +30,7 @@ from ..schemas import (
     IdeaConvert,
     IdeaIn,
 )
+from ..services.music_library import apply_default as apply_default_music
 from .common import default_content_preset, default_platform_preset, get_setting
 
 router = APIRouter(prefix="/api/ideas", tags=["ideas"])
@@ -87,6 +88,7 @@ def convert_idea(idea_id: str, body: IdeaConvert, session: Session = Depends(get
         content_preset_id=body.content_preset_id or (content.id if content else None),
         stage=Stage.IDEA,
     )
+    apply_default_music(session, project)
     session.add(project)
     session.flush()
     if plan:
@@ -426,6 +428,7 @@ def convert_item(
         content_preset_id=content.id if content else None,
         stage=Stage.IDEA,
     )
+    apply_default_music(session, project)
     session.add(project)
     session.flush()
     item.project_id = project.id

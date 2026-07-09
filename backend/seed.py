@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from .config import settings
 from .database import engine
 from .models import ContentPreset, PlatformPreset, Setting
+from .services.music_library import backfill_legacy_defaults, seed_local_library
 
 DEFAULT_PLATFORM = PlatformPreset(
     name="TikTok",
@@ -57,6 +58,9 @@ def seed() -> None:
     import json
 
     with Session(engine) as session:
+        seed_local_library(session)
+        session.flush()
+        backfill_legacy_defaults(session)
         if not session.exec(select(PlatformPreset)).first():
             session.add(DEFAULT_PLATFORM)
         if not session.exec(select(ContentPreset)).first():

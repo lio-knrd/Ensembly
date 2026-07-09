@@ -780,6 +780,19 @@ a {
 .music-filter {
   margin-bottom: 12px;
 }
+.music-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 9px;
+}
+.music-search-head {
+  margin-top: 20px;
+}
+.local-music-results {
+  max-height: none;
+  overflow: visible;
+}
 .music-results {
   display: flex;
   flex-direction: column;
@@ -800,6 +813,16 @@ a {
 }
 .music-result-main {
   min-width: 0;
+}
+.music-note {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  background: var(--surface-2);
+  font-size: 25px;
 }
 
 /* toggle */

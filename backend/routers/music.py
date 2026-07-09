@@ -8,8 +8,14 @@ from ..database import get_session
 from ..models import MusicTrack, Project
 from ..schemas import MusicTrackSelect, ProjectMusicUpdate
 from ..services import jamendo
+from ..services import music_library
 
 router = APIRouter(tags=["music"])
+
+
+@router.get("/api/music/library")
+def list_music_library(session: Session = Depends(get_session)):
+    return {"results": [_track(track) for track in music_library.local_tracks(session)]}
 
 
 @router.get("/api/music/search")
@@ -68,6 +74,25 @@ def select_project_music(
 ):
     project = _project(session, project_id)
     data = body.model_dump()
+    if body.provider == "local":
+        track = session.exec(
+            select(MusicTrack).where(
+                MusicTrack.provider == "local",
+                MusicTrack.provider_track_id == body.provider_track_id,
+            )
+        ).first()
+        if not track or not music_library.local_track_path(track):
+            raise HTTPException(404, "Local music track not found")
+        project.music_track_id = track.id
+        project.music_enabled = True
+        session.add(project)
+        session.commit()
+        return {
+            "enabled": project.music_enabled,
+            "volume": project.music_volume,
+            "track": _track(track),
+        }
+
     existing = session.exec(
         select(MusicTrack).where(
             MusicTrack.provider == "jamendo",
@@ -115,5 +140,6 @@ def _project(session: Session, project_id: str) -> Project:
 def _track(track: MusicTrack) -> dict:
     return {
         **track.model_dump(),
-        "downloaded": bool(jamendo.local_track_path(track)),
+        "audio_url": music_library.playback_url(track),
+        "downloaded": bool(music_library.local_track_path(track)),
     }

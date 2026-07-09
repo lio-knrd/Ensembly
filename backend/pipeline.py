@@ -1501,6 +1501,15 @@ def _write_metadata(
 
 
 def _music_attribution(track: MusicTrack) -> str:
+    if track.provider == "local":
+        return "\n".join(
+            [
+                "Music credit:",
+                f'"{track.title}"',
+                f"Source: {track.artist_name or 'Local music library'}",
+                "License: Royalty-free user-provided track",
+            ]
+        )
     source_url = track.share_url or f"https://www.jamendo.com/track/{track.provider_track_id}"
     license_name = _creative_commons_license_name(track.license_url)
     return "\n".join(

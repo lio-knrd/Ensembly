@@ -442,7 +442,7 @@ function SoundtrackPanel({ projectId }) {
         <div>
           <h2>Soundtrack</h2>
           <div className="panel-sub">
-            {track ? `${track.title} - ${track.artist_name || "Jamendo artist"}` : "No track selected"}
+            {track ? `${track.title} - ${track.artist_name || "Unknown artist"}` : "No music"}
           </div>
         </div>
         <div className="row">
@@ -451,7 +451,7 @@ function SoundtrackPanel({ projectId }) {
           </button>
           {track && (
             <button className="btn ghost" disabled={clear.isPending} onClick={() => clear.mutate()}>
-              Remove
+              No music
             </button>
           )}
         </div>
@@ -460,12 +460,12 @@ function SoundtrackPanel({ projectId }) {
         <div className="muted">Loading...</div>
       ) : track ? (
         <div className="soundtrack-current">
-          {track.image_url && <img src={track.image_url} alt="" />}
+          {track.image_url ? <img src={track.image_url} alt="" /> : <div className="music-note" aria-hidden="true">♪</div>}
           <div className="soundtrack-meta">
             <div className="row soundtrack-title-row">
               <strong>{track.title}</strong>
               <span className="tag">{licenseName(track.license_url)}</span>
-              {track.downloaded && <span className="tag">downloaded</span>}
+              <span className="tag">{track.provider === "local" ? "local library" : "Jamendo"}</span>
             </div>
             <div className="muted">
               {track.artist_name} {track.duration_seconds ? `- ${formatDuration(track.duration_seconds)}` : ""}
@@ -516,6 +516,10 @@ function MusicSearchModal({ projectId, onClose, onSelected }) {
     queryFn: () => api.searchMusic(submitted, { instrumental, limit: 20 }),
     enabled: Boolean(submitted),
   });
+  const { data: libraryData, isLoading: libraryLoading } = useQuery({
+    queryKey: ["music-library"],
+    queryFn: api.listMusicLibrary,
+  });
   const select = useMutation({
     mutationFn: (track) => api.selectProjectMusic(projectId, track),
     onSuccess: () => {
@@ -524,9 +528,33 @@ function MusicSearchModal({ projectId, onClose, onSelected }) {
     },
   });
   const results = data?.results || [];
+  const library = libraryData?.results || [];
 
   return (
-    <Modal title="Jamendo music" onClose={onClose}>
+    <Modal title="Choose soundtrack" onClose={onClose}>
+      <div className="music-section-head">
+        <strong>Local library</strong>
+        <span className="muted">Always available</span>
+      </div>
+      {libraryLoading ? (
+        <div className="muted">Loading library...</div>
+      ) : (
+        <div className="music-results local-music-results">
+          {library.map((track) => (
+            <MusicResult
+              key={`${track.provider}:${track.provider_track_id}`}
+              track={track}
+              pending={select.isPending}
+              onSelect={() => select.mutate(track)}
+            />
+          ))}
+          {!library.length && <div className="empty compact">No local tracks found</div>}
+        </div>
+      )}
+      <div className="music-section-head music-search-head">
+        <strong>Find another track</strong>
+        <span className="muted">Jamendo</span>
+      </div>
       <form
         className="music-search-form"
         onSubmit={(e) => {
@@ -555,32 +583,43 @@ function MusicSearchModal({ projectId, onClose, onSelected }) {
       ) : (
         <div className="music-results">
           {results.map((track) => (
-            <div className="music-result" key={track.provider_track_id}>
-              {track.image_url && <img src={track.image_url} alt="" />}
-              <div className="music-result-main">
-                <div className="row soundtrack-title-row">
-                  <strong>{track.title}</strong>
-                  <span className="tag">{licenseName(track.license_url)}</span>
-                </div>
-                <div className="muted">
-                  {track.artist_name} {track.duration_seconds ? `- ${formatDuration(track.duration_seconds)}` : ""}
-                </div>
-                {track.audio_url && <audio src={track.audio_url} controls preload="none" />}
-              </div>
-              <button
-                className="btn sm"
-                disabled={!track.download_allowed || select.isPending}
-                onClick={() => select.mutate(track)}
-                title={track.download_allowed ? "Use track" : "Download not allowed by Jamendo"}
-              >
-                Use
-              </button>
-            </div>
+            <MusicResult
+              key={`${track.provider}:${track.provider_track_id}`}
+              track={track}
+              pending={select.isPending}
+              onSelect={() => select.mutate(track)}
+            />
           ))}
           {!results.length && data?.configured !== false && <div className="empty">No tracks found</div>}
         </div>
       )}
     </Modal>
+  );
+}
+
+function MusicResult({ track, pending, onSelect }) {
+  return (
+    <div className="music-result">
+      {track.image_url ? <img src={track.image_url} alt="" /> : <div className="music-note" aria-hidden="true">♪</div>}
+      <div className="music-result-main">
+        <div className="row soundtrack-title-row">
+          <strong>{track.title}</strong>
+          <span className="tag">{licenseName(track.license_url)}</span>
+        </div>
+        <div className="muted">
+          {track.artist_name} {track.duration_seconds ? `- ${formatDuration(track.duration_seconds)}` : ""}
+        </div>
+        {track.audio_url && <audio src={track.audio_url} controls preload="none" />}
+      </div>
+      <button
+        className="btn sm"
+        disabled={!track.download_allowed || pending}
+        onClick={onSelect}
+        title={track.download_allowed ? "Use track" : "This track cannot be downloaded"}
+      >
+        Use
+      </button>
+    </div>
   );
 }
 
@@ -592,6 +631,7 @@ function formatDuration(seconds) {
 
 function licenseName(url) {
   const value = (url || "").toLowerCase();
+  if (value === "royalty-free") return "Royalty-free";
   if (value.includes("zero")) return "CC0";
   if (value.includes("by-sa")) return "CC BY-SA";
   if (value.includes("by/")) return "CC BY";

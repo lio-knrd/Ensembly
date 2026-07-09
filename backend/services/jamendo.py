@@ -10,6 +10,7 @@ import httpx
 from ..config import settings
 from ..models import MusicTrack, Project
 from ..storage import project_folder, relative_to_root, slugify
+from .music_library import local_track_path as shared_local_track_path
 
 API_BASE = "https://api.jamendo.com/v3.0"
 TIMEOUT = 18.0
@@ -135,13 +136,7 @@ def ensure_downloaded(project: Project, track: MusicTrack) -> Path:
 
 
 def local_track_path(track: MusicTrack | None) -> Path | None:
-    if not track or not track.local_path:
-        return None
-    path = (settings.projects_dir.parent.parent / track.local_path).resolve()
-    data_root = (settings.projects_dir.parent.parent / "data").resolve()
-    if data_root not in path.parents and path != data_root:
-        return None
-    return path if path.is_file() else None
+    return shared_local_track_path(track)
 
 
 def _project_folder(project: Project) -> Path:

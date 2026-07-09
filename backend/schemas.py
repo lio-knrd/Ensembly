@@ -44,6 +44,7 @@ class ProjectMusicUpdate(BaseModel):
 
 
 class MusicTrackSelect(BaseModel):
+    provider: Literal["jamendo", "local"] = "jamendo"
     provider_track_id: str
     title: str
     artist_name: str = ""

@@ -23,6 +23,7 @@ from ..schemas import (
     SceneUpdate,
 )
 from ..events import bus
+from ..services.music_library import apply_default as apply_default_music
 from .common import (
     default_content_preset,
     default_platform_preset,
@@ -83,6 +84,7 @@ def _new_project(
         content_preset_id=content_id,
         stage=Stage.IDEA,
     )
+    apply_default_music(session, project)
     session.add(project)
     session.flush()
     return project

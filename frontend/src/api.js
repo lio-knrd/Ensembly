@@ -59,6 +59,7 @@ export const api = {
   selectProjectMusic: (id, body) =>
     req(`/api/projects/${id}/music/select`, { method: "POST", body: JSON.stringify(body) }),
   clearProjectMusic: (id) => req(`/api/projects/${id}/music`, { method: "DELETE" }),
+  listMusicLibrary: () => req("/api/music/library"),
   searchMusic: (query, options = {}) => {
     const params = new URLSearchParams({
       q: query || "ambient",
