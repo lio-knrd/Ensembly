@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
+import { Flame, Kanban, Lightbulb, Moon, Settings as SettingsIcon, Sun, Users } from "lucide-react";
 import { useEvents } from "./useEvents.js";
 import { useTheme } from "./theme.js";
 import Board from "./pages/Board.jsx";
@@ -8,10 +9,10 @@ import Ideas from "./pages/Ideas.jsx";
 import Settings from "./pages/Settings.jsx";
 
 const links = [
-  { to: "/", label: "Board", end: true },
-  { to: "/characters", label: "Characters" },
-  { to: "/ideas", label: "Idea backlog" },
-  { to: "/settings", label: "Settings" },
+  { to: "/", label: "Board", icon: Kanban, end: true },
+  { to: "/characters", label: "Characters", icon: Users },
+  { to: "/ideas", label: "Idea backlog", icon: Lightbulb },
+  { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
 export default function App() {
@@ -22,8 +23,13 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          Pipeline Studio
-          <small>AI short-form video</small>
+          <span className="brand-mark">
+            <Flame size={17} strokeWidth={2.4} />
+          </span>
+          <span className="brand-name">
+            Mythforge
+            <small>AI video pipeline</small>
+          </span>
         </div>
         {links.map((l) => (
           <NavLink
@@ -32,6 +38,7 @@ export default function App() {
             end={l.end}
             className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}
           >
+            <l.icon />
             {l.label}
           </NavLink>
         ))}
@@ -41,7 +48,8 @@ export default function App() {
           onClick={toggle}
           title="Toggle light / dark theme"
         >
-          {theme === "dark" ? "☀️ Light mode" : "🌙 Dark mode"}
+          {theme === "dark" ? <Sun /> : <Moon />}
+          {theme === "dark" ? "Light mode" : "Dark mode"}
         </button>
       </aside>
       <main className="main">

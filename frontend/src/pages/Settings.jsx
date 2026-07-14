@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
+import { Check, Minus, Plus, Sparkles } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
+import AudioPlayer from "../components/AudioPlayer.jsx";
+import Loading from "../components/Loading.jsx";
 
 export default function Settings() {
   const qc = useQueryClient();
@@ -8,7 +11,7 @@ export default function Settings() {
   const [duration, setDuration] = useState("");
   const [imageModel, setImageModel] = useState("");
   useEffect(() => {
-    if (settings) setDuration(settings.default_duration_seconds);
+    if (settings) setDuration(String(settings.default_duration_seconds));
   }, [settings?.default_duration_seconds]);
   useEffect(() => {
     if (settings) setImageModel(settings.models.image);
@@ -23,7 +26,10 @@ export default function Settings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
 
-  if (!settings) return <div className="empty">Loading…</div>;
+  if (!settings) return <Loading full />;
+
+  const durationDirty = duration !== "" && Number(duration) !== settings.default_duration_seconds;
+  const imageModelDirty = Boolean(imageModel) && imageModel !== settings.models.image;
 
   return (
     <>
@@ -40,11 +46,9 @@ export default function Settings() {
       <div className="panel">
         <h2>Defaults</h2>
         <p className="panel-sub">Applied to new projects and ideas.</p>
-        <div className="row" style={{ gap: 12 }}>
-          <div style={{ width: 160 }}>
-            <label style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-soft)" }}>
-              Default duration (s)
-            </label>
+        <div className="defaults-row">
+          <div className="field">
+            <label>Default duration (s)</label>
             <input
               type="number"
               min="15"
@@ -53,8 +57,12 @@ export default function Settings() {
               onChange={(e) => setDuration(e.target.value)}
             />
           </div>
-          <button className="btn" style={{ alignSelf: "flex-end" }} onClick={() => saveDuration.mutate()}>
-            Save
+          <button
+            className={"btn" + (durationDirty ? " primary" : "")}
+            disabled={!durationDirty || saveDuration.isPending}
+            onClick={() => saveDuration.mutate()}
+          >
+            {saveDuration.isPending ? "Saving..." : durationDirty ? "Save" : "Saved"}
           </button>
         </div>
       </div>
@@ -62,45 +70,68 @@ export default function Settings() {
       <div className="panel">
         <h2>Active models</h2>
         <p className="panel-sub">
-          Image generation can be switched here; other stages still use the configured defaults.
+          Image generation can be switched here; other stages use the configured defaults.
         </p>
+
         <div className="key-row">
           <span>Script generation ({settings.active_llm_provider})</span>
-          <span className="muted">{settings.models.script}</span>
+          <span className="model-code">{settings.models.script}</span>
         </div>
-        <div className="key-row">
-          <span>Image generation</span>
-          <div className="row model-select-row">
-            <select value={imageModel} onChange={(e) => setImageModel(e.target.value)}>
-              {settings.image_model_options.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <button
-              className="btn sm"
-              disabled={!imageModel || imageModel === settings.models.image || saveImageModel.isPending}
-              onClick={() => saveImageModel.mutate()}
-            >
-              {saveImageModel.isPending ? "Saving..." : "Save"}
-            </button>
+
+        <div className="model-group">
+          <span className="model-group-label">Image generation</span>
+          <div className="model-options">
+            {settings.image_model_options.map((option) => {
+              const selected = option.id === imageModel;
+              return (
+                <button
+                  type="button"
+                  key={option.id}
+                  className={"model-option" + (selected ? " selected" : "")}
+                  onClick={() => setImageModel(option.id)}
+                >
+                  <span className="model-option-radio" />
+                  <span className="model-option-body">
+                    <span className="model-option-title">
+                      <strong>{option.label}</strong>
+                      <code>{option.id}</code>
+                      {option.id === settings.models.image && (
+                        <span className="badge">active</span>
+                      )}
+                    </span>
+                    {option.description && <p>{option.description}</p>}
+                  </span>
+                </button>
+              );
+            })}
           </div>
-        </div>
-        {settings.image_model_options
-          .filter((option) => option.id === imageModel)
-          .map((option) => (
-            <div className="model-note" key={option.id}>
-              {option.id} · {option.description}
+          {imageModelDirty && (
+            <div className="model-save-row">
+              <button
+                className="btn ghost"
+                disabled={saveImageModel.isPending}
+                onClick={() => setImageModel(settings.models.image)}
+              >
+                Reset
+              </button>
+              <button
+                className="btn primary"
+                disabled={saveImageModel.isPending}
+                onClick={() => saveImageModel.mutate()}
+              >
+                {saveImageModel.isPending ? "Saving..." : "Save model"}
+              </button>
             </div>
-          ))}
+          )}
+        </div>
+
         <div className="key-row">
           <span>Video generation</span>
-          <span className="muted">{settings.models.video}</span>
+          <span className="model-code">{settings.models.video}</span>
         </div>
         <div className="key-row">
           <span>Text-to-speech</span>
-          <span className="muted">{settings.models.tts}</span>
+          <span className="model-code">{settings.models.tts}</span>
         </div>
       </div>
 
@@ -114,6 +145,7 @@ export default function Settings() {
           <div className="key-row" key={name}>
             <span style={{ textTransform: "capitalize" }}>{name} API key</span>
             <span className={"key-status " + (present ? "ok" : "missing")}>
+              {present ? <Check /> : <Minus />}
               {present ? "loaded" : "not set"}
             </span>
           </div>
@@ -121,6 +153,7 @@ export default function Settings() {
         <div className="key-row">
           <span>FFmpeg (render engine)</span>
           <span className={"key-status " + (settings.ffmpeg_available ? "ok" : "missing")}>
+            {settings.ffmpeg_available ? <Check /> : <Minus />}
             {settings.ffmpeg_available ? "available" : "not found"}
           </span>
         </div>
@@ -138,8 +171,8 @@ function PresetSection({ kind }) {
   const styleField = isPlatform ? null : "image_style_prompt";
   const title = isPlatform ? "Platform presets" : "Content presets";
   const sub = isPlatform
-    ? "Delivery format — duration, hook/ending conventions, required metadata."
-    : "Subject matter and tone — the topic layer. Pair any content with any platform.";
+    ? "Delivery format: duration, hook/ending conventions, required metadata."
+    : "Subject matter and tone, the topic layer. Pair any content with any platform.";
 
   const list = isPlatform ? api.listPlatformPresets : api.listContentPresets;
   const create = isPlatform ? api.createPlatformPreset : api.createContentPreset;
@@ -163,7 +196,8 @@ function PresetSection({ kind }) {
           <p className="panel-sub">{sub}</p>
         </div>
         <button className="btn sm" onClick={() => setAdding(true)}>
-          + Add
+          <Plus />
+          Add
         </button>
       </div>
 
@@ -214,6 +248,14 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
     return haystack.includes(voiceSearch.trim().toLowerCase());
   });
 
+  // Dirty tracking so the save button only lights up when something changed.
+  const dirty =
+    isNew ||
+    name !== preset.name ||
+    prompt !== (preset[promptField] || "") ||
+    isDefault !== preset.is_default ||
+    (styleField && (style !== (preset[styleField] || "") || voiceId !== (preset.voice_id || "")));
+
   const save = () => {
     setSaving(true);
     const body = { name, [promptField]: prompt, is_default: isDefault };
@@ -248,12 +290,12 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
         />
         {preset.is_default && <span className="badge">default</span>}
       </div>
-      <label className="preset-field-label">Prompt (subject &amp; tone — sent to the script LLM)</label>
+      <label className="preset-field-label">Prompt (subject &amp; tone, sent to the script LLM)</label>
       <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} />
       {styleField && (
         <>
           <label className="preset-field-label">
-            Image style (applied to character sheets &amp; scene images — not the script)
+            Image style (applied to character sheets &amp; scene images, not the script)
           </label>
           <div className="preset-field-actions">
             <button
@@ -263,13 +305,14 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
               onClick={() => setStyleAssistantOpen((open) => !open)}
               title="Generate a consistent image style prompt from the content prompt"
             >
+              <Sparkles />
               AI style
             </button>
           </div>
           <textarea
             value={style}
             onChange={(e) => setStyle(e.target.value)}
-            placeholder="e.g. Cinematic oil-painting, warm dramatic lighting, cohesive palette…"
+            placeholder="e.g. Cinematic oil-painting, warm dramatic lighting, cohesive palette..."
           />
           {styleAssistantOpen && (
             <div className="style-assistant">
@@ -312,12 +355,7 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
               ))}
             </select>
             {selectedVoice?.preview_url ? (
-              <audio
-                key={selectedVoice.id}
-                src={selectedVoice.preview_url}
-                controls
-                preload="none"
-              />
+              <AudioPlayer key={selectedVoice.id} src={selectedVoice.preview_url} compact />
             ) : (
               <span className="voice-empty-preview">
                 {voiceId ? "No preview provided" : "Select a voice to preview"}
@@ -349,8 +387,12 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
               Delete
             </button>
           )}
-          <button className="btn sm primary" disabled={!name.trim() || saving} onClick={save}>
-            {saving ? "Saving…" : "Save"}
+          <button
+            className={"btn sm" + (dirty ? " primary" : "")}
+            disabled={!dirty || !name.trim() || saving}
+            onClick={save}
+          >
+            {saving ? "Saving..." : isNew ? "Create" : dirty ? "Save changes" : "Saved"}
           </button>
         </div>
       </div>

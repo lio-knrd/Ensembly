@@ -1,10 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  ImageOff,
+  Music,
+  RefreshCw,
+  Undo2,
+  UserRound,
+  X,
+} from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
 import { COLUMNS, columnForStage, isGenerating, stageLabel } from "../stages.js";
 import Modal from "../components/Modal.jsx";
 import StatusPill from "../components/StatusPill.jsx";
+import AudioPlayer from "../components/AudioPlayer.jsx";
+import Loading from "../components/Loading.jsx";
 
 export default function ProjectDetail() {
   const { id } = useParams();
@@ -23,21 +39,22 @@ export default function ProjectDetail() {
     },
   });
 
-  if (isLoading || !data) return <div className="empty">Loading…</div>;
+  if (isLoading || !data) return <Loading full />;
   const { project, scenes, metadata, characters } = data;
   const visualStyle = project.visual_style_prompt || "";
 
   return (
     <>
       <Link to="/" className="back-link">
-        ← Board
+        <ArrowLeft />
+        Board
       </Link>
       <div className="detail-head">
         <div>
           <h1>{project.title}</h1>
           <div className="detail-sub">
             <span>{project.topic_prompt}</span>
-            <span>·</span>
+            <span className="sep" />
             <span>{project.target_duration_seconds}s target</span>
             {visualStyle && (
               <span className="style-chip" title={visualStyle}>
@@ -72,7 +89,7 @@ export default function ProjectDetail() {
         <TitleCardPanel project={project} scenes={scenes} />
       )}
 
-      {project.error && <div className="banner">Error — {project.error}</div>}
+      {project.error && <div className="banner">Error: {project.error}</div>}
 
       {project.stage === "CAST_REVIEW" && <CastPanel project={project} visualStyle={visualStyle} />}
 
@@ -222,7 +239,7 @@ function TitleCardPanel({ project, scenes }) {
           )}
           {busy && (
             <div className="title-card-busy">
-              <span className="spinner" /> Creating title image…
+              <span className="spinner" /> Creating title image...
             </div>
           )}
         </div>
@@ -298,6 +315,7 @@ function TitleCardPanel({ project, scenes }) {
           <textarea
             value={prompt}
             placeholder="Leave blank to derive it from the project topic and visual style"
+            rows={2}
             onChange={(event) => setPrompt(event.target.value)}
           />
         </div>
@@ -388,10 +406,16 @@ function StageBar({ project, scenes }) {
     action = (
       <div className="row">
         <button className="btn" onClick={() => regenScript.mutate()}>
+          <RefreshCw />
           Regenerate script
         </button>
-        <button className="btn primary" onClick={() => approveScript.mutate()}>
-          Approve script → audio & cast review
+        <button
+          className="btn primary"
+          title="Generates narration audio and opens cast review"
+          onClick={() => approveScript.mutate()}
+        >
+          Approve script
+          <ArrowRight />
         </button>
       </div>
     );
@@ -405,19 +429,30 @@ function StageBar({ project, scenes }) {
     );
   } else if (project.stage === "STORYBOARD_READY") {
     action = (
-      <button className="btn primary" onClick={() => approveStoryboard.mutate()}>
-        Approve storyboard → generate clips
+      <button
+        className="btn primary"
+        title="Generates video clips from the approved storyboard"
+        onClick={() => approveStoryboard.mutate()}
+      >
+        Approve storyboard
+        <ArrowRight />
       </button>
     );
   } else if (project.stage === "CLIPS_READY") {
     action = (
-      <button className="btn primary" onClick={() => approveClips.mutate()}>
-        Approve clips → render final video
+      <button
+        className="btn primary"
+        title="Renders the final video from the approved clips"
+        onClick={() => approveClips.mutate()}
+      >
+        Approve clips
+        <ArrowRight />
       </button>
     );
   } else if (project.stage === "DONE") {
     action = (
       <button className="btn" onClick={() => rerender.mutate()}>
+        <RefreshCw />
         Re-render
       </button>
     );
@@ -448,23 +483,26 @@ function StageBar({ project, scenes }) {
       <div className="grow">
         <strong>{stageLabel(project.stage)}</strong>
         <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-          {scenes.length} scenes · {approvedCount} approved
+          {scenes.length} scenes / {approvedCount} approved
         </div>
       </div>
       <div className="stage-actions">
         {working && (
           <button className="btn danger" disabled={cancelProject.isPending} onClick={() => cancelProject.mutate()}>
+            <X />
             Cancel
           </button>
         )}
         {canStepBack && !working && (
           <button className="btn" disabled={stepBack.isPending} onClick={() => stepBack.mutate()}>
+            <ChevronLeft />
             Back one step
           </button>
         )}
         {canStepForward && !working && (
           <button className="btn" disabled={stepForward.isPending} onClick={() => stepForward.mutate()}>
             Forward one step
+            <ChevronRight />
           </button>
         )}
         {action}
@@ -501,7 +539,7 @@ function CastPanel({ project, visualStyle }) {
           <h2>Character sheets</h2>
           <p className="panel-sub" style={{ margin: 0 }}>
             {cast.length === 0
-              ? "The script references no characters — nothing to lock in."
+              ? "The script references no characters, so there is nothing to lock in."
               : missing
               ? `${missing} of ${cast.length} character${cast.length === 1 ? "" : "s"} still need a reference sheet. Sheets keep each character's look consistent across every scene (visual style comes from the content preset).`
               : "All character sheets are ready. Approve to generate the storyboard images."}
@@ -521,7 +559,7 @@ function CastPanel({ project, visualStyle }) {
             >
               {busy || genMissing.isPending ? (
                 <>
-                  <span className="spinner" /> Generating…
+                  <span className="spinner" /> Generating...
                 </>
               ) : (
                 `Generate all missing (${missing})`
@@ -530,12 +568,12 @@ function CastPanel({ project, visualStyle }) {
           )}
           <button
             className="btn primary"
+            title="Generates the storyboard images"
             disabled={approve.isPending}
             onClick={() => approve.mutate()}
           >
-            {missing > 0
-              ? "Skip & generate storyboard"
-              : "Approve cast → generate storyboard"}
+            {missing > 0 ? "Skip & generate storyboard" : "Approve cast"}
+            <ArrowRight />
           </button>
         </div>
       </div>
@@ -581,7 +619,7 @@ function CastCard({ projectId, member, onDone, busy }) {
         className="cast-thumb"
         style={thumb ? { backgroundImage: `url(${thumb})` } : undefined}
       >
-        {!thumb && "🗿"}
+        {!thumb && <UserRound />}
       </div>
         {variants.length > 1 && (
           <div className="sheet-variant-list">
@@ -618,7 +656,7 @@ function CastCard({ projectId, member, onDone, busy }) {
         )}
         <textarea
           value={description}
-          placeholder="Appearance notes — leave blank to let the AI describe"
+          placeholder="Appearance notes; leave blank to let the AI describe"
           onChange={(e) => setDescription(e.target.value)}
         />
         <button
@@ -627,7 +665,7 @@ function CastCard({ projectId, member, onDone, busy }) {
           onClick={() => gen.mutate()}
         >
           {gen.isPending
-            ? "Generating…"
+            ? "Generating..."
             : member.has_sheet
             ? "Regenerate sheet"
             : "Generate sheet"}
@@ -682,10 +720,10 @@ function SoundtrackPanel({ projectId }) {
         </div>
       </div>
       {isLoading ? (
-        <div className="muted">Loading...</div>
+        <Loading inline />
       ) : track ? (
         <div className="soundtrack-current">
-          {track.image_url ? <img src={track.image_url} alt="" /> : <div className="music-note" aria-hidden="true">♪</div>}
+          {track.image_url ? <img src={track.image_url} alt="" /> : <div className="music-note" aria-hidden="true"><Music /></div>}
           <div className="soundtrack-meta">
             <div className="row soundtrack-title-row">
               <strong>{track.title}</strong>
@@ -695,7 +733,7 @@ function SoundtrackPanel({ projectId }) {
             <div className="muted">
               {track.artist_name} {track.duration_seconds ? `- ${formatDuration(track.duration_seconds)}` : ""}
             </div>
-            {track.audio_url && <audio src={track.audio_url} controls preload="metadata" />}
+            {track.audio_url && <AudioPlayer src={track.audio_url} />}
           </div>
           <label className="check-row soundtrack-enabled">
             <input
@@ -762,7 +800,7 @@ function MusicSearchModal({ projectId, onClose, onSelected }) {
         <span className="muted">Always available</span>
       </div>
       {libraryLoading ? (
-        <div className="muted">Loading library...</div>
+        <Loading inline label="Loading library" />
       ) : (
         <div className="music-results local-music-results">
           {library.map((track) => (
@@ -825,7 +863,7 @@ function MusicSearchModal({ projectId, onClose, onSelected }) {
 function MusicResult({ track, pending, onSelect }) {
   return (
     <div className="music-result">
-      {track.image_url ? <img src={track.image_url} alt="" /> : <div className="music-note" aria-hidden="true">♪</div>}
+      {track.image_url ? <img src={track.image_url} alt="" /> : <div className="music-note" aria-hidden="true"><Music /></div>}
       <div className="music-result-main">
         <div className="row soundtrack-title-row">
           <strong>{track.title}</strong>
@@ -834,7 +872,7 @@ function MusicResult({ track, pending, onSelect }) {
         <div className="muted">
           {track.artist_name} {track.duration_seconds ? `- ${formatDuration(track.duration_seconds)}` : ""}
         </div>
-        {track.audio_url && <audio src={track.audio_url} controls preload="none" />}
+        {track.audio_url && <AudioPlayer src={track.audio_url} compact />}
       </div>
       <button
         className="btn sm"
@@ -913,6 +951,7 @@ function FinalPanel({ project, metadata }) {
           )}
           {videoUrl && (
             <a className="btn" href={videoUrl} download>
+              <Download />
               Download MP4
             </a>
           )}
@@ -1069,7 +1108,7 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
                       title={ref.excluded ? "Use this context image" : "Exclude this context image"}
                       onClick={() => setContextExcluded(ref.scene_id, !ref.excluded)}
                     >
-                      {ref.excluded ? "Undo" : "X"}
+                      {ref.excluded ? <Undo2 /> : <X />}
                     </button>
                   </div>
                 );
@@ -1078,7 +1117,7 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
                 .filter((item) => !contextRefs.some((ref) => ref.scene_number === item.source_scene))
                 .map((item, idx) => (
                   <div key={`${item.source_scene}-${idx}`} className="context-ref missing">
-                    <div className="context-ref-placeholder">?</div>
+                    <div className="context-ref-placeholder"><ImageOff /></div>
                     <div>
                       <span>Scene {item.source_scene}</span>
                       {item.visual_anchor && <small>{item.visual_anchor}</small>}
@@ -1127,7 +1166,7 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             <span className="tag">new character: {scene.suggested_characters.join(", ")}</span>
           )}
         </div>
-        {audio && <Waveform src={audio} />}
+        {audio && <AudioPlayer src={audio} />}
         {audioVariants.length > 1 && (
           <label className="audio-variant-select">
             <span>Narration version</span>
@@ -1154,20 +1193,24 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
           className={"btn sm " + (scene.approved ? "" : "primary")}
           onClick={() => save.mutate({ approved: !scene.approved })}
         >
-          {scene.approved ? "Approved ✓" : "Approve"}
+          {scene.approved && <Check />}
+          {scene.approved ? "Approved" : "Approve"}
         </button>
         {img && (
           <button className="btn sm" disabled={regenImage.isPending} onClick={() => regenImage.mutate()}>
+            <RefreshCw />
             Regen image
           </button>
         )}
         {audio && (
           <button className="btn sm" disabled={regenAudio.isPending} onClick={() => regenAudio.mutate()}>
+            <RefreshCw />
             Regen audio
           </button>
         )}
         {scene.scene_type === "video" && img && (
           <button className="btn sm" disabled={regenClip.isPending} onClick={() => regenClip.mutate()}>
+            <RefreshCw />
             Regen clip
           </button>
         )}
@@ -1210,19 +1253,3 @@ function AssetVariants({ label, kind, paths, activePath, pending, onSelect }) {
   );
 }
 
-// Lightweight synthetic waveform + native audio playback (duration visible).
-function Waveform({ src }) {
-  const bars = Array.from({ length: 40 }, (_, i) =>
-    6 + Math.abs(Math.sin(i * 1.3) * 16) + (i % 3) * 2
-  );
-  return (
-    <div>
-      <div className="waveform">
-        {bars.map((h, i) => (
-          <span key={i} style={{ height: `${h}px` }} />
-        ))}
-      </div>
-      <audio key={src} src={src} controls preload="metadata" />
-    </div>
-  );
-}

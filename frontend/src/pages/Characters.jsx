@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { Pencil, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
 import Modal from "../components/Modal.jsx";
+import Loading from "../components/Loading.jsx";
 
 export default function Characters() {
   const [showNew, setShowNew] = useState(false);
@@ -25,12 +27,13 @@ export default function Characters() {
           </div>
         </div>
         <button className="btn primary" onClick={() => setShowNew(true)}>
-          + Add character
+          <Plus />
+          Add character
         </button>
       </div>
 
       {isLoading ? (
-        <div className="empty">Loading...</div>
+        <Loading full />
       ) : characters.length === 0 ? (
         <div className="character-empty">
           <strong>No characters yet.</strong>
@@ -159,6 +162,7 @@ function CharacterCard({ character }) {
             </div>
           </div>
           <button className="btn sm" onClick={() => setEditing(true)}>
+            <Pencil />
             Edit
           </button>
         </div>
@@ -192,7 +196,7 @@ function CharacterCard({ character }) {
         </div>
         <div className="char-prompt">
           <span>Generation prompt</span>
-          <p>{promptText || "No saved prompt yet — the form description will be used."}</p>
+          <p>{promptText || "No saved prompt yet; the form description will be used."}</p>
         </div>
 
         {regen.isError && <div className="banner compact">{String(regen.error.message)}</div>}
@@ -206,12 +210,15 @@ function CharacterCard({ character }) {
             onClick={() => regen.mutate()}
             title={!hasDescription ? "Add a description before generating a sheet." : undefined}
           >
+            <RefreshCw />
             {regen.isPending ? "Generating new sheet..." : sheetButtonText}
           </button>
           <button className="btn" onClick={() => fileRef.current.click()}>
+            <Upload />
             Upload sheet
           </button>
           <button className="btn danger" onClick={() => del.mutate()}>
+            <Trash2 />
             Delete
           </button>
           <input

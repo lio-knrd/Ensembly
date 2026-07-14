@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { ArrowDown, ArrowUp, Plus, Sparkles } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
 import Modal from "../components/Modal.jsx";
+import Loading from "../components/Loading.jsx";
 
 const STATUSES = [
   ["suggested", "Suggested"],
@@ -46,7 +48,8 @@ export default function Ideas() {
         </div>
         {view === "plans" && (
           <button className="btn primary" onClick={() => setPlanModal({})}>
-            + New plan
+            <Plus />
+            New plan
           </button>
         )}
       </div>
@@ -137,7 +140,7 @@ function IdeaInbox({ plans }) {
     <>
       <div className="panel inbox-composer">
         <input
-          placeholder="A topic, hook, question, or half-formed idea…"
+          placeholder="A topic, hook, question, or half-formed idea..."
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => event.key === "Enter" && text.trim() && add.mutate()}
@@ -166,9 +169,9 @@ function IdeaInbox({ plans }) {
               <div className="grow">
                 <h4>{idea.text}</h4>
                 <div className="sub">
-                  {idea.target_duration_seconds}s
-                  {" · "}
-                  {idea.plan_id ? planNames[idea.plan_id] || "Assigned plan" : "Global inbox"}
+                  <span>{idea.target_duration_seconds}s</span>
+                  <span className="sep" />
+                  <span>{idea.plan_id ? planNames[idea.plan_id] || "Assigned plan" : "Global inbox"}</span>
                 </div>
               </div>
               <button className="btn sm primary" onClick={() => convert.mutate(idea.id)}>
@@ -198,7 +201,7 @@ function PlanSidebar({ plans, selectedId, onSelect }) {
           onClick={() => onSelect(plan.id)}
         >
           <strong>{plan.name}</strong>
-          <span>{[plan.platform_preset_name, plan.content_preset_name].filter(Boolean).join(" · ") || "Global"}</span>
+          <span>{[plan.platform_preset_name, plan.content_preset_name].filter(Boolean).join(" / ") || "Global"}</span>
         </button>
         {renderBranch(plan.id, depth + 1)}
       </div>
@@ -252,7 +255,7 @@ function PlanDetail({ planId, onEdit, onDeleted }) {
     onSuccess: onDeleted,
   });
 
-  if (isLoading || !plan) return <div className="empty editorial-empty">Loading plan…</div>;
+  if (isLoading || !plan) return <Loading full label="Loading plan" />;
   const items = plan.items || [];
   const move = (index, delta) => {
     const target = index + delta;
@@ -295,7 +298,8 @@ function PlanDetail({ planId, onEdit, onDeleted }) {
         </div>
         <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={2} />
         <button className="btn primary" disabled={!instruction.trim() || suggest.isPending} onClick={() => suggest.mutate()}>
-          {suggest.isPending ? "Planning…" : "Suggest next works"}
+          <Sparkles />
+          {suggest.isPending ? "Planning..." : "Suggest next works"}
         </button>
       </div>
       {aiOverview && <div className="banner compact">{aiOverview}</div>}
@@ -303,7 +307,10 @@ function PlanDetail({ planId, onEdit, onDeleted }) {
 
       <div className="timeline-head">
         <div><h3>Timeline</h3><span>{items.length} works</span></div>
-        <button className="btn" onClick={() => setWorkModal({})}>+ Add existing or planned work</button>
+        <button className="btn" onClick={() => setWorkModal({})}>
+          <Plus />
+          Add existing or planned work
+        </button>
       </div>
       {items.length === 0 ? (
         <div className="empty">No works yet. Add an existing video or ask the AI what should come first.</div>
@@ -350,7 +357,7 @@ function EditorialCard({
         <div className="editorial-card-title">
           <div>
             {item.part_group_title && (
-              <span className="part-label">{item.part_group_title} · Part {item.part_number}</span>
+              <span className="part-label">{item.part_group_title} / Part {item.part_number}</span>
             )}
             <h4>{item.title}</h4>
           </div>
@@ -361,7 +368,7 @@ function EditorialCard({
         {item.summary && <p>{item.summary}</p>}
         <div className="coverage-box">
           <strong>Coverage</strong>
-          <span>{item.coverage_summary || "Not documented — AI cannot reliably avoid overlap yet."}</span>
+          <span>{item.coverage_summary || "Not documented; AI cannot reliably avoid overlap yet."}</span>
         </div>
         {item.ai_rationale && <div className="ai-rationale">Why this comes next: {item.ai_rationale}</div>}
         <div className="editorial-card-meta">
@@ -370,8 +377,12 @@ function EditorialCard({
           {item.external_url && <a href={item.external_url} target="_blank" rel="noreferrer">External link</a>}
         </div>
         <div className="editorial-card-actions">
-          <button className="btn sm" disabled={index === 0} onClick={() => onMove(index, -1)}>↑</button>
-          <button className="btn sm" disabled={index === total - 1} onClick={() => onMove(index, 1)}>↓</button>
+          <button className="btn sm icon" title="Move up" disabled={index === 0} onClick={() => onMove(index, -1)}>
+            <ArrowUp />
+          </button>
+          <button className="btn sm icon" title="Move down" disabled={index === total - 1} onClick={() => onMove(index, 1)}>
+            <ArrowDown />
+          </button>
           <button className="btn sm" onClick={onEdit}>Edit context</button>
           {item.status === "suggested" && <button className="btn sm" onClick={() => onStatus("planned")}>Accept</button>}
           {item.project_id ? (
@@ -422,7 +433,7 @@ function PlanModal({ plan, plans, onClose, onSaved }) {
         <label>Editorial rules</label>
         <textarea
           rows={6}
-          placeholder="Define ordering, boundaries, allowed deviations, callbacks, depth, audience…"
+          placeholder="Define ordering, boundaries, allowed deviations, callbacks, depth, audience..."
           {...field("editorial_rules")}
         />
       </div>

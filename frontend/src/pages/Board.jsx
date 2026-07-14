@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Plus } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
 import { COLUMNS, columnForStage } from "../stages.js";
 import StatusPill from "../components/StatusPill.jsx";
 import Modal from "../components/Modal.jsx";
+import Loading from "../components/Loading.jsx";
 
 export default function Board() {
   const [showNew, setShowNew] = useState(false);
@@ -24,12 +26,13 @@ export default function Board() {
           <p>Every project, across the pipeline.</p>
         </div>
         <button className="btn primary" onClick={() => setShowNew(true)}>
-          + New Project
+          <Plus />
+          New project
         </button>
       </div>
 
       {isLoading ? (
-        <div className="empty">Loading…</div>
+        <Loading full />
       ) : projects.length === 0 ? (
         <div className="empty">
           No projects yet. Create one to start the pipeline.
@@ -184,7 +187,7 @@ function NewProjectModal({ onClose }) {
             disabled={create.isPending || createSplit.isPending}
             onClick={() => createSplit.mutate()}
           >
-            {createSplit.isPending ? "Creating both…" : "Yes, create both parts"}
+            {createSplit.isPending ? "Creating both..." : "Yes, create both parts"}
           </button>
         </div>
       </Modal>
@@ -261,9 +264,9 @@ function NewProjectModal({ onClose }) {
           onClick={() => analyze.mutate()}
         >
           {analyze.isPending
-            ? "Checking scope…"
+            ? "Checking scope..."
             : create.isPending
-              ? "Creating…"
+              ? "Creating..."
               : "Create & generate script"}
         </button>
       </div>
