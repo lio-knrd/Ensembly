@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import mimetypes
+import threading
 import time
 import textwrap
 from io import BytesIO
@@ -19,6 +22,10 @@ from .base import ImageGenerator
 
 # 9:16 vertical, a sensible short-form default.
 WIDTH, HEIGHT = 720, 1280
+
+_KREA_API_BASE = "https://api.krea.ai"
+_KREA_DIRECT_ENDPOINT = "/generate/image/krea/krea-2/medium"
+_KREA_ASSET_CACHE_LOCK = threading.Lock()
 
 
 class FalImageGenerator(ImageGenerator):
@@ -71,6 +78,121 @@ class KreaImageGenerator(ImageGenerator):
         out_path = out_path.with_suffix(".png")
         out_path.write_bytes(img.content)
         return out_path
+
+
+class KreaDirectImageGenerator(ImageGenerator):
+    """Krea 2 Medium through Krea's own API, bypassing fal.ai."""
+
+    name = "krea-direct"
+
+    def generate(self, prompt, out_path: Path, reference_images=None):
+        payload: dict = {
+            "prompt": prompt,
+            "aspect_ratio": "9:16",
+            "resolution": "1K",
+            "creativity": "medium",
+        }
+        if reference_images:
+            payload["image_style_references"] = [
+                {"url": self._asset_url(path), "strength": 1.0}
+                for path in reference_images[:10]
+            ]
+
+        headers = {
+            "Authorization": f"Bearer {settings.krea_api_key}",
+            "Content-Type": "application/json",
+        }
+        response = httpx.post(
+            f"{_KREA_API_BASE}{_KREA_DIRECT_ENDPOINT}",
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Krea API {response.status_code}: {response.text[:600]}")
+        job = response.json()
+        job_id = job.get("job_id")
+        if not job_id:
+            raise RuntimeError(f"Krea API returned no job_id: {job}")
+
+        result = self._job_result(job_id, headers)
+        urls = (result.get("result") or {}).get("urls", [])
+        if not urls:
+            raise RuntimeError(f"Krea API returned no images: {result}")
+        image = httpx.get(urls[0], timeout=120)
+        image.raise_for_status()
+        out_path = out_path.with_suffix(".png")
+        out_path.write_bytes(image.content)
+        return out_path
+
+    @staticmethod
+    def _asset_url(path: Path) -> str:
+        path = Path(path)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        cache_path = settings.krea_asset_cache_file
+        with _KREA_ASSET_CACHE_LOCK:
+            cache = _load_krea_asset_cache(cache_path)
+            cached = cache.get(digest)
+            if cached:
+                return cached
+
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            with path.open("rb") as file_handle:
+                response = httpx.post(
+                    f"{_KREA_API_BASE}/assets",
+                    headers={"Authorization": f"Bearer {settings.krea_api_key}"},
+                    files={"file": (path.name, file_handle, mime)},
+                    data={"description": f"Mythforge reference: {path.name}"},
+                    timeout=120,
+                )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Krea asset upload {response.status_code}: {response.text[:600]}"
+                )
+            asset = response.json()
+            url = asset.get("image_url") or asset.get("url")
+            if not url:
+                raise RuntimeError(f"Krea asset upload returned no URL: {asset}")
+            cache[digest] = url
+            _save_krea_asset_cache(cache_path, cache)
+            return url
+
+    @staticmethod
+    def _job_result(job_id: str, headers: dict[str, str], timeout_seconds: int = 300) -> dict:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            response = httpx.get(
+                f"{_KREA_API_BASE}/jobs/{job_id}",
+                headers=headers,
+                timeout=30,
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Krea job {response.status_code}: {response.text[:600]}"
+                )
+            data = response.json()
+            status = str(data.get("status", "")).lower()
+            if status == "completed":
+                return data
+            if status in {"failed", "canceled", "cancelled"}:
+                raise RuntimeError(f"Krea job {status}: {data}")
+            time.sleep(3)
+        raise TimeoutError(f"Krea job timed out: {job_id}")
+
+
+def _load_krea_asset_cache(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_krea_asset_cache(path: Path, cache: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
 
 
 class OfflineImageGenerator(ImageGenerator):

@@ -755,6 +755,10 @@ a {
   align-items: start;
 }
 
+.title-card-media {
+  min-width: 0;
+}
+
 .title-card-preview {
   position: relative;
   overflow: hidden;

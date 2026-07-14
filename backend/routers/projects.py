@@ -22,9 +22,12 @@ from ..schemas import (
     SceneAssetSelect,
     SceneUpdate,
     TitleCardGenerate,
+    TitleCardSelect,
+    TitleCardUpdate,
 )
 from ..events import bus
 from ..services.music_library import apply_default as apply_default_music
+from ..storage import slugify
 from .common import (
     default_content_preset,
     default_platform_preset,
@@ -224,6 +227,8 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
         forms = session.exec(select(CharacterForm).where(CharacterForm.character_id == cid)).all()
         characters.append({**char.model_dump(), "forms": [f.model_dump() for f in forms]})
     project_data = project.model_dump()
+    project_data["title_card_variants"] = _title_card_options(project)
+    project_data["final_video_version"] = _final_video_version(project)
     project_data["voice_name"] = tts_voice_label(None)
     project_data["voice_id"] = ""
     if project.content_preset_id:
@@ -408,6 +413,39 @@ def generate_title_card(
     return {"ok": True}
 
 
+@router.patch("/{project_id}/title-card")
+def update_title_card(
+    project_id: str,
+    body: TitleCardUpdate,
+    session: Session = Depends(get_session),
+):
+    _require(session, project_id)
+    pipeline.update_title_card_overlay(
+        project_id,
+        body.kicker,
+        body.text,
+        body.part_label,
+        body.prompt,
+    )
+    return {"ok": True}
+
+
+@router.post("/{project_id}/title-card/select")
+def select_title_card(
+    project_id: str,
+    body: TitleCardSelect,
+    session: Session = Depends(get_session),
+):
+    project = _require(session, project_id)
+    options = _title_card_options(project)
+    if body.path not in {item["path"] for item in options}:
+        raise HTTPException(400, "Unknown title-image candidate")
+    selected = pipeline.select_title_card_variant(project_id, body.path)
+    if not selected:
+        raise HTTPException(400, "Unknown title-image candidate")
+    return {"ok": True, "project": selected}
+
+
 # --- Scenes ---
 @router.patch("/{project_id}/scenes/{scene_id}")
 def update_scene(project_id: str, scene_id: str, body: SceneUpdate, session: Session = Depends(get_session)):
@@ -461,7 +499,11 @@ def select_scene_asset(
         options = _paths_with_current(scene.image_variants, scene.image_path)
         if body.path not in options:
             raise HTTPException(400, "Unknown image candidate")
+        changed = body.path != scene.image_path
         scene.image_path = body.path
+        if changed and scene.scene_type == SceneType.VIDEO:
+            scene.clip_variants = _paths_with_current(scene.clip_variants, scene.clip_path)
+            scene.clip_path = None
     elif body.kind == "clip":
         options = _paths_with_current(scene.clip_variants, scene.clip_path)
         if body.path not in options:
@@ -538,3 +580,30 @@ def _audio_options(scene: Scene) -> list[dict]:
             "duration_seconds": scene.duration_seconds,
         })
     return result
+
+
+def _title_card_options(project: Project) -> list[dict]:
+    result = []
+    seen = set()
+    for raw in list(project.title_card_variants or []) + [
+        {"path": project.title_card_path, "source_path": project.title_card_source_path}
+    ]:
+        item = raw if isinstance(raw, dict) else {"path": str(raw), "source_path": ""}
+        path = str(item.get("path", "") or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        result.append({"path": path, "source_path": str(item.get("source_path", "") or "")})
+    return result
+
+
+def _final_video_version(project: Project) -> int | None:
+    if not project.folder_path:
+        return None
+    path = (
+        Path(settings.projects_dir.parent.parent)
+        / project.folder_path
+        / "final"
+        / f"{slugify(project.title)}.mp4"
+    )
+    return int(path.stat().st_mtime) if path.is_file() else None

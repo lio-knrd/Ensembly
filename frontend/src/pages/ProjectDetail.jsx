@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
@@ -102,18 +102,27 @@ function showSoundtrack(stage) {
 
 function TitleCardPanel({ project, scenes }) {
   const qc = useQueryClient();
+  const projectQueryKey = ["project", project.id];
   const usableScenes = scenes.filter((scene) => scene.image_path);
   const [sceneId, setSceneId] = useState(usableScenes[0]?.id || "");
   const [kicker, setKicker] = useState(project.title_card_kicker || "");
   const [text, setText] = useState(project.title_card_text || project.title || "");
   const [partLabel, setPartLabel] = useState(project.title_card_part_label || "");
   const [prompt, setPrompt] = useState(project.title_card_prompt || "");
+  const hydrated = useRef(false);
   const busy = project.title_card_status === "generating";
   const cover = mediaUrl(project.title_card_path, project.title_card_version);
+  const titleVariants = (project.title_card_variants || [])
+    .map((item) => (typeof item === "string" ? { path: item } : item))
+    .filter((item) => item?.path);
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["project", project.id] });
     qc.invalidateQueries({ queryKey: ["projects"] });
   };
+  const updateCopy = useMutation({
+    mutationFn: (body) => api.updateTitleCard(project.id, body),
+    onSuccess: invalidate,
+  });
   const create = useMutation({
     mutationFn: (mode) =>
       api.generateTitleCard(project.id, {
@@ -126,30 +135,106 @@ function TitleCardPanel({ project, scenes }) {
       }),
     onSuccess: invalidate,
   });
+  const selectCover = useMutation({
+    mutationFn: (path) => api.selectTitleCard(project.id, { path }),
+    onMutate: async (path) => {
+      await qc.cancelQueries({ queryKey: projectQueryKey });
+      const previous = qc.getQueryData(projectQueryKey);
+      qc.setQueryData(projectQueryKey, (current) =>
+        current
+          ? {
+              ...current,
+              project: {
+                ...current.project,
+                title_card_path: path,
+                title_card_status: "ready",
+                title_card_version: (current.project.title_card_version || 0) + 1,
+              },
+            }
+          : current
+      );
+      return { previous };
+    },
+    onError: (_error, _path, context) => {
+      if (context?.previous) qc.setQueryData(projectQueryKey, context.previous);
+    },
+    onSuccess: (data) => {
+      if (data?.project) {
+        qc.setQueryData(projectQueryKey, (current) =>
+          current
+            ? {
+                ...current,
+                project: { ...current.project, ...data.project },
+              }
+            : current
+        );
+      }
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
 
   useEffect(() => {
     setKicker(project.title_card_kicker || "");
     setText(project.title_card_text || project.title || "");
     setPartLabel(project.title_card_part_label || "");
+    setPrompt(project.title_card_prompt || "");
+    hydrated.current = true;
   }, [
     project.title,
     project.title_card_kicker,
     project.title_card_text,
     project.title_card_part_label,
+    project.title_card_prompt,
+  ]);
+
+  useEffect(() => {
+    if (!hydrated.current || busy || !text.trim()) return undefined;
+    const next = { kicker, text, part_label: partLabel, prompt };
+    const unchanged =
+      next.kicker === (project.title_card_kicker || "") &&
+      next.text === (project.title_card_text || project.title || "") &&
+      next.part_label === (project.title_card_part_label || "") &&
+      next.prompt === (project.title_card_prompt || "");
+    if (unchanged) return undefined;
+    const timer = window.setTimeout(() => updateCopy.mutate(next), 650);
+    return () => window.clearTimeout(timer);
+  }, [
+    busy,
+    kicker,
+    text,
+    partLabel,
+    prompt,
+    project.title,
+    project.title_card_kicker,
+    project.title_card_text,
+    project.title_card_part_label,
+    project.title_card_prompt,
   ]);
 
   return (
     <div className="panel title-card-panel">
-      <div className="title-card-preview">
-        {cover ? (
-          <img src={cover} alt={`Title image: ${project.title_card_text || project.title}`} />
-        ) : (
-          <div className="title-card-placeholder">No title image yet</div>
-        )}
-        {busy && (
-          <div className="title-card-busy">
-            <span className="spinner" /> Creating title image…
-          </div>
+      <div className="title-card-media">
+        <div className="title-card-preview">
+          {cover ? (
+            <img src={cover} alt={`Title image: ${project.title_card_text || project.title}`} />
+          ) : (
+            <div className="title-card-placeholder">No title image yet</div>
+          )}
+          {busy && (
+            <div className="title-card-busy">
+              <span className="spinner" /> Creating title image…
+            </div>
+          )}
+        </div>
+        {titleVariants.length > 1 && (
+          <AssetVariants
+            label="Covers"
+            kind="image"
+            paths={titleVariants.map((item) => item.path)}
+            activePath={project.title_card_path}
+            pending={busy || selectCover.isPending || updateCopy.isPending}
+            onSelect={(path) => selectCover.mutate(path)}
+          />
         )}
       </div>
       <div className="title-card-controls">
@@ -222,12 +307,15 @@ function TitleCardPanel({ project, scenes }) {
             disabled={busy || create.isPending || !text.trim()}
             onClick={() => create.mutate("generate")}
           >
-            Generate new cover
+            Generate new image version
           </button>
+          {updateCopy.isPending && <span className="muted">Updating title image...</span>}
           {project.title_card_status === "failed" && (
             <span className="banner compact">Title image generation failed.</span>
           )}
           {create.error && <span className="banner compact">{create.error.message}</span>}
+          {updateCopy.error && <span className="banner compact">{updateCopy.error.message}</span>}
+          {selectCover.error && <span className="banner compact">{selectCover.error.message}</span>}
         </div>
       </div>
     </div>
@@ -781,7 +869,7 @@ function FinalPanel({ project, metadata }) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
-  const videoUrl = folder ? mediaUrl(`${folder}/final/${slug}.mp4`) : null;
+  const videoUrl = folder ? mediaUrl(`${folder}/final/${slug}.mp4`, project.final_video_version) : null;
 
   return (
     <div className="panel">

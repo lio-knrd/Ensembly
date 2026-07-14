@@ -50,7 +50,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "default_duration_seconds": 75,
     "default_platform_preset_name": "TikTok",
     "default_content_preset_name": "Greek Mythology",
-    "active_image_model": "fal-ai/flux/dev",
+    "active_image_model": settings.fal_krea_image_model,
 }
 
 

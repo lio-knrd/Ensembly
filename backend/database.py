@@ -25,6 +25,10 @@ _ADDED_COLUMNS = [
     ("scenes", "use_next_scene_as_end_frame", "BOOLEAN DEFAULT 1"),
     ("scenes", "image_variants", "JSON DEFAULT '[]'"),
     ("scenes", "clip_variants", "JSON DEFAULT '[]'"),
+    ("scenes", "video_request_id", "TEXT DEFAULT NULL"),
+    ("scenes", "video_request_status", "TEXT DEFAULT NULL"),
+    ("scenes", "video_request_status_url", "TEXT DEFAULT NULL"),
+    ("scenes", "video_request_response_url", "TEXT DEFAULT NULL"),
     ("scenes", "audio_variants", "JSON DEFAULT '[]'"),
     ("projects", "failed_stage", "TEXT DEFAULT NULL"),
     ("projects", "cancel_requested", "BOOLEAN DEFAULT 0"),
@@ -41,6 +45,7 @@ _ADDED_COLUMNS = [
     ("projects", "title_card_prompt", "TEXT DEFAULT ''"),
     ("projects", "title_card_status", "TEXT DEFAULT 'pending'"),
     ("projects", "title_card_version", "INTEGER DEFAULT 0"),
+    ("projects", "title_card_variants", "JSON DEFAULT '[]'"),
     ("ideas", "plan_id", "TEXT DEFAULT NULL"),
 ]
 

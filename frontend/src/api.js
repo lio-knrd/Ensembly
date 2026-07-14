@@ -55,6 +55,10 @@ export const api = {
   rerender: (id) => req(`/api/projects/${id}/render`, { method: "POST" }),
   generateTitleCard: (id, body) =>
     req(`/api/projects/${id}/title-card`, { method: "POST", body: JSON.stringify(body) }),
+  updateTitleCard: (id, body) =>
+    req(`/api/projects/${id}/title-card`, { method: "PATCH", body: JSON.stringify(body) }),
+  selectTitleCard: (id, body) =>
+    req(`/api/projects/${id}/title-card/select`, { method: "POST", body: JSON.stringify(body) }),
   getProjectMusic: (id) => req(`/api/projects/${id}/music`),
   updateProjectMusic: (id, body) =>
     req(`/api/projects/${id}/music`, { method: "PATCH", body: JSON.stringify(body) }),

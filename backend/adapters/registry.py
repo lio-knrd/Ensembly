@@ -14,7 +14,12 @@ from ..config import settings
 from ..database import engine
 from ..models import Setting
 from .base import ImageGenerator, ScriptGenerator, TTSGenerator, VideoGenerator
-from .image import FalImageGenerator, KreaImageGenerator, OfflineImageGenerator
+from .image import (
+    FalImageGenerator,
+    KreaDirectImageGenerator,
+    KreaImageGenerator,
+    OfflineImageGenerator,
+)
 from .llm import AnthropicScriptGenerator, OfflineScriptGenerator, OpenAIScriptGenerator
 from .tts import ElevenLabsTTSGenerator, OfflineTTSGenerator
 from .video import FalVideoGenerator, OfflineVideoGenerator
@@ -87,10 +92,13 @@ def get_tts_generator(voice_id: str | None = None) -> TTSGenerator:
 
 
 def get_image_generator() -> ImageGenerator:
-    if settings.fal_api_key:
-        model = active_image_model()
-        if model == settings.fal_krea_image_model:
+    model = active_image_model()
+    if model == settings.fal_krea_image_model:
+        if settings.krea_api_key:
+            return KreaDirectImageGenerator()
+        if settings.fal_api_key:
             return KreaImageGenerator()
+    if settings.fal_api_key:
         return FalImageGenerator()
     if _offline_ok():
         return OfflineImageGenerator()

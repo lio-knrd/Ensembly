@@ -75,6 +75,7 @@ class Project(SQLModel, table=True):
     title_card_prompt: str = ""
     title_card_status: str = "pending"  # pending | generating | ready | failed
     title_card_version: int = 0
+    title_card_variants: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     stage: Stage = Field(default=Stage.IDEA)
     folder_path: Optional[str] = None
     # Free-form status text surfaced during long-running generation, plus any error.
@@ -112,6 +113,12 @@ class Scene(SQLModel, table=True):
     # the currently selected candidates used by downstream pipeline stages.
     image_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     clip_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    # Persisted fal queue state so a timeout/restart can resume without
+    # submitting a duplicate paid generation.
+    video_request_id: Optional[str] = None
+    video_request_status: Optional[str] = None
+    video_request_status_url: Optional[str] = None
+    video_request_response_url: Optional[str] = None
     audio_variants: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     duration_seconds: Optional[float] = None
     asset_version: int = 0

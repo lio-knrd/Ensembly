@@ -10,7 +10,7 @@ import json
 import re
 import traceback
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -68,6 +68,28 @@ def _audio_options_with(options: list[dict] | None, candidate: dict) -> list[dic
     result = list(options or [])
     result = [item for item in result if item.get("path") != candidate.get("path")]
     result.append(candidate)
+    return result
+
+
+def _title_card_variant(path: str | None, source_path: str | None) -> dict | None:
+    if not path:
+        return None
+    return {"path": path, "source_path": source_path or ""}
+
+
+def _title_card_variants_with(
+    variants: list[dict] | None,
+    *candidates: dict | None,
+) -> list[dict]:
+    result: list[dict] = []
+    seen: set[str] = set()
+    for raw in list(variants or []) + [candidate for candidate in candidates if candidate]:
+        item = raw if isinstance(raw, dict) else {"path": str(raw), "source_path": ""}
+        path = str(item.get("path", "") or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        result.append({"path": path, "source_path": str(item.get("source_path", "") or "")})
     return result
 
 def submit(fn, *args) -> None:
@@ -470,9 +492,10 @@ def _build_title_card(
     prompt: str,
 ) -> None:
     folder = _folder(project)
-    title_text = text.strip() or project.title_card_text or _fallback_cover_title(project.title)
-    kicker_text = kicker.strip() or project.title_card_kicker
-    resolved_part_label = part_label.strip() or project.title_card_part_label or _series_part_label(project)
+    title_text = text.strip() or _fallback_cover_title(project.title)
+    kicker_text = kicker.strip()
+    resolved_part_label = part_label.strip()
+    previous = _title_card_variant(project.title_card_path, project.title_card_source_path)
     if mode == "generate":
         title_prompt = prompt.strip() or (
             f"Vertical cinematic cover image for a short-form story titled '{title_text}'. "
@@ -490,19 +513,99 @@ def _build_title_card(
             raise FileNotFoundError("The selected title-card source image is missing")
         project.title_card_prompt = ""
 
-    output = folder / "images" / "title_card.png"
+    output = _candidate_path(folder, "images", "title_card", ".png")
     _render_title_overlay(source, output, title_text, kicker_text, resolved_part_label)
     project.title_card_source_path = _rel(source)
     project.title_card_path = _rel(output)
     project.title_card_kicker = kicker_text
     project.title_card_text = title_text
     project.title_card_part_label = resolved_part_label
+    project.title_card_variants = _title_card_variants_with(
+        project.title_card_variants,
+        previous,
+        _title_card_variant(project.title_card_path, project.title_card_source_path),
+    )
     project.title_card_status = "ready"
     project.title_card_version = (project.title_card_version or 0) + 1
     _touch(project)
     session.add(project)
     session.commit()
     bus.publish("project.title_card", project_id=project.id, status="ready")
+
+
+def update_title_card_overlay(
+    project_id: str,
+    kicker: str | None = None,
+    text: str | None = None,
+    part_label: str | None = None,
+    prompt: str | None = None,
+) -> None:
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            return
+
+        if kicker is not None:
+            project.title_card_kicker = kicker.strip()
+        if text is not None:
+            project.title_card_text = text.strip() or _fallback_cover_title(project.title)
+        if part_label is not None:
+            project.title_card_part_label = part_label.strip()
+        if prompt is not None:
+            project.title_card_prompt = prompt.strip()
+
+        source = _asset_path(project.title_card_source_path)
+        output = _asset_path(project.title_card_path)
+        if source and output and source.exists():
+            _render_title_overlay(
+                source,
+                output,
+                project.title_card_text,
+                project.title_card_kicker,
+                project.title_card_part_label,
+            )
+            project.title_card_status = "ready"
+            project.title_card_version = (project.title_card_version or 0) + 1
+            project.title_card_variants = _title_card_variants_with(
+                project.title_card_variants,
+                _title_card_variant(project.title_card_path, project.title_card_source_path),
+            )
+        _touch(project)
+        session.add(project)
+        session.commit()
+        bus.publish("project.title_card", project_id=project.id, status=project.title_card_status)
+
+
+def select_title_card_variant(project_id: str, path: str) -> dict | None:
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            return None
+        options = _title_card_variants_with(
+            project.title_card_variants,
+            _title_card_variant(project.title_card_path, project.title_card_source_path),
+        )
+        selected = next((item for item in options if item["path"] == path), None)
+        if not selected:
+            return None
+        project.title_card_path = selected["path"]
+        if selected.get("source_path"):
+            project.title_card_source_path = selected["source_path"]
+        project.title_card_variants = options
+        project.title_card_status = "ready"
+        project.title_card_version = (project.title_card_version or 0) + 1
+        _touch(project)
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+        return {
+            "title_card_path": project.title_card_path,
+            "title_card_source_path": project.title_card_source_path,
+            "title_card_status": project.title_card_status,
+            "title_card_version": project.title_card_version,
+            "title_card_variants": project.title_card_variants,
+            "updated_at": project.updated_at.isoformat(),
+        }
 
 
 def generate_title_card(
@@ -1348,7 +1451,11 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
     out = _candidate_path(
         folder, "images", f"scene_{scene.order_index + 1:02d}", ".png"
     )
-    ref_label = "style reference image" if getattr(img, "name", "") == "krea" else "reference image panel"
+    ref_label = (
+        "style reference image"
+        if getattr(img, "name", "") in {"krea", "krea-direct"}
+        else "reference image panel"
+    )
     prompt = _apply_continuity_context(
         _apply_character_context(
             _apply_style(scene.image_prompt, _content_style(session, project)),
@@ -1367,6 +1474,9 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
     scene.image_variants = _paths_with(
         scene.image_variants, previous, scene.image_path
     )
+    if previous != scene.image_path and scene.scene_type == SceneType.VIDEO:
+        scene.clip_variants = _paths_with(scene.clip_variants, scene.clip_path)
+        scene.clip_path = None
     scene.status = "ready"
     scene.asset_version = (scene.asset_version or 0) + 1
     session.add(scene)
@@ -1583,33 +1693,44 @@ def generate_clips(project_id: str) -> None:
         if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
             return
         _set_stage(session, project, Stage.CLIPS_GENERATING, "Generating motion clips…")
-        folder = _folder(project)
-        scenes = session.exec(
-            select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
-        ).all()
-        try:
-            vid = get_video_generator()
-            for scene in scenes:
-                if _stop_if_canceled(session, project):
-                    return
-                if scene.scene_type != SceneType.VIDEO or not scene.image_path:
-                    continue
-                out = folder / "clips" / f"scene_{scene.order_index + 1:02d}.mp4"
-                if _asset_exists(scene.clip_path):
-                    _save_scene_ready(session, project, scene)
-                    continue
-                if out.exists():
-                    scene.clip_path = _rel(out)
-                    _save_scene_ready(session, project, scene)
-                    continue
-                if not _generate_scene_clip(session, project, scene, folder, vid):
-                    return
-        except Exception as exc:  # noqa: BLE001
-            if _stop_if_canceled(session, project):
-                return
-            _fail(session, project, "clip generation", exc)
+        scene_ids = [
+            scene.id
+            for scene in session.exec(
+                select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
+            ).all()
+            if scene.scene_type == SceneType.VIDEO and scene.image_path
+        ]
+
+    if not scene_ids:
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            if project:
+                _set_stage(session, project, Stage.CLIPS_READY, "Clips ready for review")
+        return
+
+    # Video submissions are independent once the stills exist. Each worker has
+    # its own DB session, and request IDs are committed before polling begins.
+    errors: list[Exception] = []
+    worker_count = min(4, len(scene_ids))
+    with ThreadPoolExecutor(max_workers=worker_count) as video_executor:
+        futures = [
+            video_executor.submit(_generate_scene_clip_job, project_id, scene_id)
+            for scene_id in scene_ids
+        ]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
             return
         if _stop_if_canceled(session, project):
+            return
+        if errors:
+            _fail(session, project, "clip generation", errors[0])
             return
         _set_stage(session, project, Stage.CLIPS_READY, "Clips ready for review")
 
@@ -1634,46 +1755,140 @@ def _next_scene_image(session, project, scene: Scene) -> Path | None:
     return None
 
 
-def _generate_scene_clip(session, project, scene: Scene, folder: Path, vid) -> bool:
-    if _stop_if_canceled(session, project):
-        return False
-    bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="clip")
-    scene.status = "generating"
-    session.add(scene)
-    session.commit()
-    image_abs = Path(settings.projects_dir.parent.parent) / scene.image_path
-    out = _candidate_path(
-        folder, "clips", f"scene_{scene.order_index + 1:02d}", ".mp4"
-    )
-    duration = scene.duration_seconds or 3.0
-    character_refs = _scene_character_refs(session, scene)
-    element_limit = getattr(vid, "_MAX_ELEMENTS", len(character_refs))
-    element_refs = character_refs[:element_limit]
-    prompt = _build_clip_prompt(scene.image_prompt, element_refs)
-    result = vid.generate(
-        image_abs,
-        prompt,
-        out,
-        duration,
-        elements=[(ref["path"], ref["variants"]) for ref in element_refs] or None,
-        end_image_path=(
+def _generate_scene_clip_job(project_id: str, scene_id: str, force: bool = False) -> bool:
+    """Submit or resume one queued video request, using short-lived sessions."""
+    vid = get_video_generator()
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        scene = session.get(Scene, scene_id)
+        if not project or not scene or not scene.image_path:
+            return False
+        folder = _folder(project)
+        out = _candidate_path(folder, "clips", f"scene_{scene.order_index + 1:02d}", ".mp4")
+        stable_out = folder / "clips" / f"scene_{scene.order_index + 1:02d}.mp4"
+        if not force and _asset_exists(scene.clip_path):
+            _save_scene_ready(session, project, scene)
+            return True
+        if not force and stable_out.exists():
+            scene.clip_path = _rel(stable_out)
+            scene.video_request_id = None
+            scene.video_request_status = "completed"
+            scene.video_request_status_url = None
+            scene.video_request_response_url = None
+            _save_scene_ready(session, project, scene)
+            return True
+        if _stop_if_canceled(session, project):
+            return False
+
+        image_abs = Path(settings.projects_dir.parent.parent) / scene.image_path
+        duration = scene.duration_seconds or 3.0
+        character_refs = _scene_character_refs(session, scene)
+        element_limit = getattr(vid, "_MAX_ELEMENTS", len(character_refs))
+        element_refs = character_refs[:element_limit]
+        prompt = _build_clip_prompt(scene.image_prompt, element_refs)
+        end_image = (
             _next_scene_image(session, project, scene)
             if scene.use_next_scene_as_end_frame
             else None
-        ),
-    )
-    if _stop_if_canceled(session, project):
-        return False
-    previous = scene.clip_path
-    scene.clip_path = _rel(result)
-    scene.clip_variants = _paths_with(
-        scene.clip_variants, previous, scene.clip_path
-    )
-    scene.asset_version = (scene.asset_version or 0) + 1
-    scene.status = "ready"
-    session.add(scene)
-    session.commit()
-    bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+        )
+        existing_request_id = None if force else scene.video_request_id
+        existing_status_url = None if force else scene.video_request_status_url
+        existing_response_url = None if force else scene.video_request_response_url
+        scene.status = "generating"
+        if force:
+            scene.video_request_id = None
+            scene.video_request_status = None
+            scene.video_request_status_url = None
+            scene.video_request_response_url = None
+        session.add(scene)
+        session.commit()
+        bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="clip")
+
+    elements = [(ref["path"], ref["variants"]) for ref in element_refs] or None
+    if not hasattr(vid, "submit") or not hasattr(vid, "retrieve"):
+        result = vid.generate(image_abs, prompt, out, duration, elements, end_image)
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            scene = session.get(Scene, scene_id)
+            if not project or not scene:
+                return False
+            previous = scene.clip_path
+            scene.clip_path = _rel(result)
+            scene.clip_variants = _paths_with(scene.clip_variants, previous, scene.clip_path)
+            scene.video_request_status = "completed"
+            scene.asset_version = (scene.asset_version or 0) + 1
+            scene.status = "ready"
+            session.add(scene)
+            session.commit()
+            bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+        return True
+
+    request_id = existing_request_id
+    request_status_url = existing_status_url
+    request_response_url = existing_response_url
+    if not request_id:
+        request = vid.submit(image_abs, prompt, duration, elements, end_image)
+        request_id = request["request_id"]
+        request_status_url = request.get("status_url")
+        request_response_url = request.get("response_url")
+        with Session(engine) as session:
+            scene = session.get(Scene, scene_id)
+            if not scene:
+                return False
+            scene.video_request_id = request_id
+            scene.video_request_status = "queued"
+            scene.video_request_status_url = request_status_url
+            scene.video_request_response_url = request_response_url
+            session.add(scene)
+            session.commit()
+
+    try:
+        result = vid.retrieve(
+            request_id,
+            out,
+            status_url=request_status_url,
+            response_url=request_response_url,
+        )
+    except TimeoutError:
+        with Session(engine) as session:
+            scene = session.get(Scene, scene_id)
+            if scene:
+                scene.video_request_id = request_id
+                scene.video_request_status = "timeout"
+                scene.status = "failed"
+                session.add(scene)
+                session.commit()
+        raise
+    except Exception:
+        with Session(engine) as session:
+            scene = session.get(Scene, scene_id)
+            if scene:
+                scene.video_request_id = None
+                scene.video_request_status = "failed"
+                scene.video_request_status_url = None
+                scene.video_request_response_url = None
+                scene.status = "failed"
+                session.add(scene)
+                session.commit()
+        raise
+
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        scene = session.get(Scene, scene_id)
+        if not project or not scene:
+            return False
+        previous = scene.clip_path
+        scene.clip_path = _rel(result)
+        scene.clip_variants = _paths_with(scene.clip_variants, previous, scene.clip_path)
+        scene.video_request_id = None
+        scene.video_request_status = "completed"
+        scene.video_request_status_url = None
+        scene.video_request_response_url = None
+        scene.asset_version = (scene.asset_version or 0) + 1
+        scene.status = "ready"
+        session.add(scene)
+        session.commit()
+        bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
     return True
 
 
@@ -1914,18 +2129,10 @@ def regenerate_scene_image(project_id: str, scene_id: str) -> None:
 
 
 def regenerate_scene_clip(project_id: str, scene_id: str) -> None:
-    with Session(engine) as session:
-        project = session.get(Project, project_id)
-        scene = session.get(Scene, scene_id)
-        if not project or not scene or not scene.image_path:
-            return
-        folder = _folder(project)
-        try:
-            _generate_scene_clip(session, project, scene, folder, get_video_generator())
-        except Exception:  # noqa: BLE001
-            if _stop_if_canceled(session, project):
-                return
-            traceback.print_exc()
+    try:
+        _generate_scene_clip_job(project_id, scene_id, force=True)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
 
 
 def _rel(path: Path) -> str:

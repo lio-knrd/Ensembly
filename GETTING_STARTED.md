@@ -27,7 +27,7 @@ Leave the keys blank to run fully offline, or fill any of:
 |---|---|---|
 | Script | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` + `DEFAULT_LLM_PROVIDER` | Anthropic / OpenAI |
 | Audio + timestamps | `ELEVENLABS_API_KEY` | ElevenLabs |
-| Images & video | `FAL_API_KEY` | fal.ai (aggregator) |
+| Images & video | `KREA_API_KEY` / `FAL_API_KEY` | Direct Krea for Krea 2; fal.ai for other image/video models |
 
 ## 2. Install & build
 

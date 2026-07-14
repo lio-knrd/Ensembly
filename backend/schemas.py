@@ -41,6 +41,17 @@ class TitleCardGenerate(BaseModel):
     prompt: str = ""
 
 
+class TitleCardUpdate(BaseModel):
+    kicker: Optional[str] = None
+    text: Optional[str] = None
+    part_label: Optional[str] = None
+    prompt: Optional[str] = None
+
+
+class TitleCardSelect(BaseModel):
+    path: str
+
+
 class ProjectDetail(BaseModel):
     project: dict
     scenes: list[dict]

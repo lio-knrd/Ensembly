@@ -32,6 +32,7 @@ class Settings(BaseModel):
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "").strip()
     fal_api_key: str = os.getenv("FAL_API_KEY", "").strip()
+    krea_api_key: str = os.getenv("KREA_API_KEY", "").strip()
     jamendo_client_id: str = (
         os.getenv("JAMENDO_CLIENT_ID")
         or os.getenv("JAMEDO_CLIENT_ID")
@@ -46,6 +47,9 @@ class Settings(BaseModel):
     projects_dir: Path = (ROOT_DIR / os.getenv("PROJECTS_DIR", "./data/projects")).resolve()
     characters_dir: Path = (ROOT_DIR / os.getenv("CHARACTERS_DIR", "./data/characters")).resolve()
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
+    krea_asset_cache_file: Path = (
+        ROOT_DIR / os.getenv("KREA_ASSET_CACHE_FILE", "./data/krea_asset_cache.json")
+    ).resolve()
 
     allow_offline_fallback: bool = _bool(os.getenv("ALLOW_OFFLINE_FALLBACK"), True)
 
@@ -90,6 +94,7 @@ class Settings(BaseModel):
             "openai": bool(self.openai_api_key),
             "elevenlabs": bool(self.elevenlabs_api_key),
             "fal": bool(self.fal_api_key),
+            "krea": bool(self.krea_api_key),
             "jamendo": bool(self.jamendo_client_id),
         }
 
