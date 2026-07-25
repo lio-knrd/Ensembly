@@ -108,12 +108,16 @@ class SceneAssetSelect(BaseModel):
 class CharacterCreate(BaseModel):
     name: str
     description: str = ""
+    # The group (content preset) the character belongs to. Omitted -> the
+    # default group, so a caller that doesn't care still lands somewhere real.
+    content_preset_id: Optional[str] = None
     generate_reference: bool = False  # generate a reference image from description
 
 
 class CharacterUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    content_preset_id: Optional[str] = None
 
 
 class CharacterReferenceSelect(BaseModel):

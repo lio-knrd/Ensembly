@@ -98,7 +98,12 @@ export const api = {
     }),
 
   // Characters
-  listCharacters: () => req("/api/characters"),
+  listCharacters: (contentPresetId) =>
+    req(
+      contentPresetId
+        ? `/api/characters?content_preset_id=${encodeURIComponent(contentPresetId)}`
+        : "/api/characters"
+    ),
   createCharacter: (body) =>
     req("/api/characters", { method: "POST", body: JSON.stringify(body) }),
   updateCharacter: (id, body) =>

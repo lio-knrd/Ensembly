@@ -805,8 +805,7 @@ def generate_script(project_id: str) -> None:
             session.delete(old)
         session.commit()
 
-        characters = session.exec(select(Character)).all()
-        by_name = {c.name.lower(): c for c in characters}
+        by_name = {c.name.lower(): c for c in _group_characters(session, project)}
 
         for idx, s in enumerate(script.scenes):
             matched, suggested, assignments = [], [], []
@@ -1069,6 +1068,17 @@ def _final_ready(project: Project) -> bool:
 # --------------------------------------------------------------------------- #
 # Cast / character sheets (reviewed before scene images are generated)
 # --------------------------------------------------------------------------- #
+def _group_characters(session: Session, project: Project) -> list[Character]:
+    """The character library visible to this project — its group's, and only its.
+
+    A project without a group sees the ungrouped characters, so cast matching is
+    never a cross-group lookup in either direction.
+    """
+    return session.exec(
+        select(Character).where(Character.content_preset_id == project.content_preset_id)
+    ).all()
+
+
 def compute_cast(session: Session, project: Project) -> list[dict]:
     """The distinct characters referenced by this project's scenes.
 
@@ -1190,13 +1200,16 @@ def generate_character_sheet(
             return
         _set_msg(session, project, f"Generating character sheet: {name}…")
 
-        existing = session.exec(
-            select(Character).where(Character.name == name)
-        ).first() or next(
-            (c for c in session.exec(select(Character)).all() if c.name.lower() == name.lower()),
+        # Reuse only a character from this project's own group; a same-named
+        # character in another group is a different library entry.
+        in_group = _group_characters(session, project)
+        existing = next(
+            (c for c in in_group if c.name.lower() == name.lower()),
             None,
         )
-        char = existing or Character(name=name.strip())
+        char = existing or Character(
+            name=name.strip(), content_preset_id=project.content_preset_id
+        )
 
         if description:
             char.description = description.strip()

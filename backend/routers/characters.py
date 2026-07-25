@@ -1,20 +1,25 @@
-"""Global character library (spec section 10.3)."""
+"""Group-scoped character library (spec section 10.3).
+
+Every character belongs to one group (content preset); the library is browsed
+and filtered per group, and a project only ever casts from its own group.
+"""
 from __future__ import annotations
 
 import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlmodel import Session, func, select
 
 from ..adapters import get_image_generator
 from ..config import settings
 from ..database import get_session
 from ..events import bus
-from ..models import Character, CharacterForm, ProjectCharacter, Scene
+from ..models import Character, CharacterForm, ContentPreset, ProjectCharacter, Scene
 from ..schemas import CharacterCreate, CharacterReferenceSelect, CharacterUpdate
 from ..storage import character_folder
+from .common import default_content_preset
 
 router = APIRouter(prefix="/api/characters", tags=["characters"])
 
@@ -47,11 +52,27 @@ def _serialize(session: Session, char: Character) -> dict:
     forms = session.exec(
         select(CharacterForm).where(CharacterForm.character_id == char.id).order_by(CharacterForm.is_default.desc(), CharacterForm.name)
     ).all()
+    group = (
+        session.get(ContentPreset, char.content_preset_id)
+        if char.content_preset_id
+        else None
+    )
     return {
         **char.model_dump(),
+        "content_preset_name": group.name if group else "",
         "forms": [f.model_dump() for f in forms],
         "used_in_projects": _usage_count(session, char.id),
     }
+
+
+def _resolve_group(session: Session, content_preset_id: str | None) -> str | None:
+    """Validate an explicit group, or fall back to the default one."""
+    if content_preset_id:
+        if not session.get(ContentPreset, content_preset_id):
+            raise HTTPException(404, "Group not found")
+        return content_preset_id
+    fallback = default_content_preset(session)
+    return fallback.id if fallback else None
 
 
 def _default_form(session: Session, char: Character) -> CharacterForm:
@@ -104,14 +125,39 @@ def _publish_character(session: Session, char: Character) -> None:
 
 
 @router.get("")
-def list_characters(session: Session = Depends(get_session)):
-    chars = session.exec(select(Character).order_by(Character.name)).all()
+def list_characters(
+    content_preset_id: str | None = Query(
+        default=None,
+        description="Only characters in this group; 'none' lists ungrouped ones.",
+    ),
+    session: Session = Depends(get_session),
+):
+    query = select(Character)
+    if content_preset_id == "none":
+        query = query.where(Character.content_preset_id == None)  # noqa: E711
+    elif content_preset_id:
+        query = query.where(Character.content_preset_id == content_preset_id)
+    chars = session.exec(query.order_by(Character.name)).all()
     return [_serialize(session, c) for c in chars]
 
 
 @router.post("", status_code=201)
 def create_character(body: CharacterCreate, session: Session = Depends(get_session)):
-    char = Character(name=body.name.strip(), description=body.description.strip())
+    # An explicitly-null group means ungrouped; an omitted one means "wherever
+    # the default group is", so an API caller never has to know group ids.
+    if "content_preset_id" in body.model_fields_set:
+        group_id = (
+            _resolve_group(session, body.content_preset_id)
+            if body.content_preset_id
+            else None
+        )
+    else:
+        group_id = _resolve_group(session, None)
+    char = Character(
+        name=body.name.strip(),
+        description=body.description.strip(),
+        content_preset_id=group_id,
+    )
     session.add(char)
     session.commit()
     session.refresh(char)
@@ -150,7 +196,16 @@ def update_character(character_id: str, body: CharacterUpdate, session: Session 
     char = session.get(Character, character_id)
     if not char:
         raise HTTPException(404, "Character not found")
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    if "content_preset_id" in updates:
+        # An explicit null moves the character out of every group rather than
+        # silently re-homing it in the default one.
+        updates["content_preset_id"] = (
+            _resolve_group(session, updates["content_preset_id"])
+            if updates["content_preset_id"]
+            else None
+        )
+    for field, value in updates.items():
         setattr(char, field, value)
     session.add(char)
     _sync_default_form(session, char)

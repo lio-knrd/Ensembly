@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 
 from ..adapters.llm import ai_image_style_prompt
 from ..database import get_session
-from ..models import ContentPreset, PlatformPreset
+from ..models import Character, ContentPreset, PlatformPreset
 from ..schemas import ContentPresetIn, PlatformPresetIn, StyleSuggestionIn
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
@@ -101,6 +101,11 @@ def delete_content(preset_id: str, session: Session = Depends(get_session)):
     preset = session.get(ContentPreset, preset_id)
     if not preset:
         raise HTTPException(404, "Preset not found")
+    # The group owned characters; deleting it must not orphan them behind a
+    # dead id, so they drop back to ungrouped and stay in the library.
+    for char in session.exec(select(Character).where(Character.content_preset_id == preset_id)):
+        char.content_preset_id = None
+        session.add(char)
     session.delete(preset)
     session.commit()
 

@@ -17,6 +17,7 @@ _ADDED_COLUMNS = [
     ("characters", "reference_style_prompt", "TEXT DEFAULT ''"),
     ("characters", "reference_version", "INTEGER DEFAULT 0"),
     ("characters", "reference_variants", "JSON DEFAULT '[]'"),
+    ("characters", "content_preset_id", "TEXT DEFAULT NULL"),
     ("character_forms", "reference_variants", "JSON DEFAULT '[]'"),
     ("scenes", "asset_version", "INTEGER DEFAULT 0"),
     ("scenes", "continuity_context", "JSON DEFAULT '[]'"),
@@ -82,6 +83,57 @@ def _run_migrations() -> None:
                 # preserve them instead of treating every legacy row as AI-owned.
                 if table == "projects" and column == "title_is_custom":
                     conn.execute(text("UPDATE projects SET title_is_custom = 1"))
+                if table == "characters" and column == "content_preset_id":
+                    _backfill_character_groups(conn)
+
+
+def _backfill_character_groups(conn) -> None:
+    """Give every pre-existing (global) character a group.
+
+    A character's group is inferred from the projects that already use it: both
+    the explicit project_characters links and the per-scene character_ids lists.
+    Where a character was used across groups the most-used one wins; characters
+    no project ever used fall back to the default content preset.
+    """
+    import json
+    from collections import Counter
+
+    project_group = {
+        row[0]: row[1]
+        for row in conn.execute(text("SELECT id, content_preset_id FROM projects"))
+        if row[1]
+    }
+    votes: dict[str, Counter] = {}
+
+    def vote(character_id: str, project_id: str) -> None:
+        group = project_group.get(project_id)
+        if group:
+            votes.setdefault(character_id, Counter())[group] += 1
+
+    for character_id, project_id in conn.execute(
+        text("SELECT character_id, project_id FROM project_characters")
+    ):
+        vote(character_id, project_id)
+    for project_id, character_ids in conn.execute(
+        text("SELECT project_id, character_ids FROM scenes")
+    ):
+        for character_id in json.loads(character_ids or "[]"):
+            vote(character_id, project_id)
+
+    fallback_row = conn.execute(
+        text("SELECT id FROM content_presets ORDER BY is_default DESC, name LIMIT 1")
+    ).first()
+    fallback = fallback_row[0] if fallback_row else None
+
+    for row in conn.execute(text("SELECT id FROM characters")):
+        character_id = row[0]
+        counted = votes.get(character_id)
+        group = counted.most_common(1)[0][0] if counted else fallback
+        if group:
+            conn.execute(
+                text("UPDATE characters SET content_preset_id = :group WHERE id = :id"),
+                {"group": group, "id": character_id},
+            )
 
 
 def get_session() -> Iterator[Session]:

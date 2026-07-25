@@ -147,6 +147,13 @@ class Character(SQLModel, table=True):
     __tablename__ = "characters"
 
     id: str = Field(default_factory=_uuid, primary_key=True)
+    # Characters belong to exactly one group (content preset), so a cast lookup
+    # never crosses group lines — "Zeus" in the mythology group and a "Zeus" in
+    # a cat-cartoon group are separate library entries. NULL means ungrouped:
+    # reachable only from the library, never matched into a project's cast.
+    content_preset_id: Optional[str] = Field(
+        default=None, foreign_key="content_presets.id", index=True
+    )
     name: str
     description: str = ""
     reference_image_path: Optional[str] = None

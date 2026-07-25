@@ -5,23 +5,50 @@ import { api, mediaUrl } from "../api.js";
 import Modal from "../components/Modal.jsx";
 import Loading from "../components/Loading.jsx";
 
+const UNGROUPED = "none";
+
 export default function Characters() {
   const [showNew, setShowNew] = useState(false);
+  const [groupId, setGroupId] = useState(null);
   const { data: characters = [], isLoading } = useQuery({
     queryKey: ["characters"],
-    queryFn: api.listCharacters,
+    queryFn: () => api.listCharacters(),
   });
-  const readyCount = characters.filter((c) => defaultForm(c)?.reference_image_path || c.reference_image_path).length;
-  const formCount = characters.reduce((sum, c) => sum + formsFor(c).length, 0);
+  const { data: groups = [] } = useQuery({
+    queryKey: ["content-presets"],
+    queryFn: api.listContentPresets,
+  });
+
+  const countFor = (id) =>
+    characters.filter((c) => (c.content_preset_id || UNGROUPED) === id).length;
+  const ungroupedCount = countFor(UNGROUPED);
+  const tabs = [
+    ...groups.map((g) => ({ id: g.id, name: g.name })),
+    ...(ungroupedCount ? [{ id: UNGROUPED, name: "Ungrouped" }] : []),
+  ];
+  // Land on the default group until the creator picks another tab.
+  const activeId =
+    groupId && tabs.some((t) => t.id === groupId)
+      ? groupId
+      : (groups.find((g) => g.is_default) || groups[0])?.id || UNGROUPED;
+  const activeGroup = groups.find((g) => g.id === activeId) || null;
+  const shown = characters.filter(
+    (c) => (c.content_preset_id || UNGROUPED) === activeId
+  );
+  const readyCount = shown.filter((c) => defaultForm(c)?.reference_image_path || c.reference_image_path).length;
+  const formCount = shown.reduce((sum, c) => sum + formsFor(c).length, 0);
 
   return (
     <>
       <div className="page-head character-page-head">
         <div>
           <h1>Character library</h1>
-          <p>Global character sheets used by projects for identity consistency.</p>
+          <p>
+            Character sheets belong to one group, so a project only ever casts
+            from its own group.
+          </p>
           <div className="character-stats">
-            <span>{characters.length} characters</span>
+            <span>{shown.length} characters</span>
             <span>{formCount} forms</span>
             <span>{readyCount} default sheets ready</span>
           </div>
@@ -32,27 +59,47 @@ export default function Characters() {
         </button>
       </div>
 
-      {isLoading ? (
-        <Loading full />
-      ) : characters.length === 0 ? (
-        <div className="character-empty">
-          <strong>No characters yet.</strong>
-          <span>Add one to create a reusable reference sheet.</span>
-        </div>
-      ) : (
-        <div className="character-list">
-          {characters.map((c) => (
-            <CharacterCard key={c.id} character={c} />
+      {tabs.length > 1 && (
+        <div className="editorial-tabs">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              className={tab.id === activeId ? "active" : ""}
+              onClick={() => setGroupId(tab.id)}
+            >
+              {tab.name} ({countFor(tab.id)})
+            </button>
           ))}
         </div>
       )}
 
-      {showNew && <CharacterModal onClose={() => setShowNew(false)} />}
+      {isLoading ? (
+        <Loading full />
+      ) : shown.length === 0 ? (
+        <div className="character-empty">
+          <strong>No characters in {activeGroup?.name || "this group"} yet.</strong>
+          <span>Add one to create a reusable reference sheet.</span>
+        </div>
+      ) : (
+        <div className="character-list">
+          {shown.map((c) => (
+            <CharacterCard key={c.id} character={c} groups={groups} />
+          ))}
+        </div>
+      )}
+
+      {showNew && (
+        <CharacterModal
+          groups={groups}
+          defaultGroupId={activeId === UNGROUPED ? "" : activeId}
+          onClose={() => setShowNew(false)}
+        />
+      )}
     </>
   );
 }
 
-function CharacterCard({ character }) {
+function CharacterCard({ character, groups }) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const fileRef = useRef();
@@ -156,6 +203,9 @@ function CharacterCard({ character }) {
       <div className="char-body">
         <div className="char-title-row">
           <div>
+            <div className="scope-chips">
+              <span>{character.content_preset_name || "Ungrouped"}</span>
+            </div>
             <h3>{character.name}</h3>
             <div className="char-used">
               {character.used_in_projects} project{character.used_in_projects === 1 ? "" : "s"} / {forms.length} form{forms.length === 1 ? "" : "s"} / {variantCount} sheet version{variantCount === 1 ? "" : "s"}
@@ -232,7 +282,11 @@ function CharacterCard({ character }) {
       </div>
 
       {editing && (
-        <CharacterModal character={character} onClose={() => setEditing(false)} />
+        <CharacterModal
+          character={character}
+          groups={groups}
+          onClose={() => setEditing(false)}
+        />
       )}
     </div>
   );
@@ -295,19 +349,31 @@ function defaultForm(character) {
   return formsFor(character).find((form) => form.is_default) || formsFor(character)[0];
 }
 
-function CharacterModal({ character, onClose }) {
+function CharacterModal({ character, groups = [], defaultGroupId = "", onClose }) {
   const qc = useQueryClient();
   const editing = !!character;
   const [name, setName] = useState(character?.name || "");
   const [description, setDescription] = useState(character?.description || "");
+  const [contentPresetId, setContentPresetId] = useState(
+    editing ? character.content_preset_id || "" : defaultGroupId
+  );
   const [generate, setGenerate] = useState(false);
   const invalidate = () => qc.invalidateQueries({ queryKey: ["characters"] });
 
   const save = useMutation({
     mutationFn: () =>
       editing
-        ? api.updateCharacter(character.id, { name, description })
-        : api.createCharacter({ name, description, generate_reference: generate }),
+        ? api.updateCharacter(character.id, {
+            name,
+            description,
+            content_preset_id: contentPresetId || null,
+          })
+        : api.createCharacter({
+            name,
+            description,
+            content_preset_id: contentPresetId || null,
+            generate_reference: generate,
+          }),
     onSuccess: () => {
       invalidate();
       onClose();
@@ -319,6 +385,20 @@ function CharacterModal({ character, onClose }) {
       <div className="field">
         <label>Name</label>
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Zeus" />
+      </div>
+      <div className="field">
+        <label>Group</label>
+        <select
+          value={contentPresetId}
+          onChange={(e) => setContentPresetId(e.target.value)}
+        >
+          {groups.map((group) => (
+            <option key={group.id} value={group.id}>
+              {group.name}
+            </option>
+          ))}
+          <option value="">Ungrouped</option>
+        </select>
       </div>
       <div className="field">
         <label>Description (appearance notes, used to build prompts)</label>
