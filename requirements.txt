@@ -21,3 +21,10 @@ Pillow==11.1.0
 # 0.116+ is required for the `output_config` structured-output parameter used
 # by the script-generation adapter.
 anthropic==0.116.0
+
+# Animation engine for animation scenes: the script AI authors Manim code that
+# is rendered in an isolated subprocess (backend/adapters/animation.py). OPTIONAL
+# and heavy; without it, animation scenes fall back to a placeholder card.
+# Requires Python 3.13-compatible Manim (0.19+). For typeset math (MathTex/Tex)
+# install a LaTeX distribution (e.g. MiKTeX); Text-based scenes work without it.
+manim>=0.19,<0.21

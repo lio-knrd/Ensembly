@@ -46,6 +46,23 @@ DEFAULT_CONTENT = ContentPreset(
     voice_id=settings.elevenlabs_voice_id,
 )
 
+DEFAULT_MATH_CONTENT = ContentPreset(
+    name="Math & Science (animated)",
+    content_prompt=(
+        "Explain a single mathematical or scientific idea clearly and vividly for "
+        "a general audience. Build intuition step by step, define terms in plain "
+        "language, and keep one tight through-line. Where a precise diagram — a "
+        "graph, a curve, a count, a number line, or growing bars — explains better "
+        "than a photo, use an animation scene and sync its cues to the narration."
+    ),
+    image_style_prompt=(
+        "Clean, modern explanatory visuals on a dark background: crisp shapes, high "
+        "contrast, minimal clutter, a restrained accent palette. Vertical 9:16."
+    ),
+    enable_animations=True,
+    voice_id=settings.elevenlabs_voice_id,
+)
+
 DEFAULT_SETTINGS: dict[str, object] = {
     "default_duration_seconds": 75,
     "default_platform_preset_name": "TikTok",
@@ -65,6 +82,15 @@ def seed() -> None:
             session.add(DEFAULT_PLATFORM)
         if not session.exec(select(ContentPreset)).first():
             session.add(DEFAULT_CONTENT)
+        # Ship an animations-enabled preset once, so the deterministic-animation
+        # feature is discoverable. A marker keeps it from resurrecting if deleted.
+        if session.get(Setting, "seeded_math_preset") is None:
+            exists = session.exec(
+                select(ContentPreset).where(ContentPreset.name == DEFAULT_MATH_CONTENT.name)
+            ).first()
+            if not exists:
+                session.add(DEFAULT_MATH_CONTENT)
+            session.add(Setting(key="seeded_math_preset", value=json.dumps(True)))
         for key, value in DEFAULT_SETTINGS.items():
             existing = session.get(Setting, key)
             if existing is None:

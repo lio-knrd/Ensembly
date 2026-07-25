@@ -37,8 +37,13 @@ def _coerce_script(data: dict) -> GeneratedScript:
     scenes = []
     for raw in data.get("scenes", []):
         st = str(raw.get("scene_type", "still")).lower()
-        if st not in ("still", "video"):
+        if st not in ("still", "video", "animation"):
             st = "still"
+        # The script LLM no longer authors Manim code: an animation scene only
+        # declares its scene_type here. The code is generated later, after audio
+        # exists, from the (merged) narration — so animation stays None at this
+        # stage. See pipeline._render_scene_animation / llm.author_manim_code.
+        animation = None
         continuity_context = []
         for item in raw.get("continuity_context", []) or []:
             if not isinstance(item, dict):
@@ -83,6 +88,7 @@ def _coerce_script(data: dict) -> GeneratedScript:
                 scene_type=st,
                 characters=characters,
                 continuity_context=continuity_context,
+                animation=animation,
             )
         )
     return GeneratedScript(scenes=scenes, metadata=data.get("metadata", {}))
@@ -117,8 +123,10 @@ class OpenAIScriptGenerator(ScriptGenerator):
                 {"role": "user", "content": user_prompt},
             ],
             "response_format": {
+                # Not strict: the animation-enabled schema uses optional fields
+                # and free-form params. _coerce_script sanitizes the output.
                 "type": "json_schema",
-                "json_schema": {"name": "script", "schema": schema, "strict": True},
+                "json_schema": {"name": "script", "schema": schema, "strict": False},
             },
         }
         resp = httpx.post(
@@ -507,6 +515,133 @@ def _offline_editorial_suggestions(instruction: str, existing_items: list[dict],
         "overview": "Offline planning suggestions generated without an LLM provider.",
         "suggestions": suggestions,
     }
+
+
+def _strip_code_fences(text: str) -> str:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    return text
+
+
+def author_manim_code(
+    narration: str,
+    duration: float,
+    latex_available: bool,
+) -> str | None:
+    """Author Manim construct-body code for one animation scene, AFTER its audio.
+
+    Called in the storyboard stage once narration audio + word timestamps exist,
+    so the diagram is written against the final (merged) narration and its real
+    length. Voice sync stays phrase-anchored via ``self.cue(...)``, which resolves
+    the injected WORDS at render time. Returns construct-body code (no fences), or
+    None if no LLM is available. The pipeline then renders it with the same
+    bounded auto-repair loop used for user-edited code.
+    """
+    from ..animation.catalog import catalog_for_prompt
+
+    instruction = f"""Write Manim Community code — the BODY of construct(self) — for a short \
+vertical (9:16) animation that visualizes the narration below and stays in sync \
+with the spoken voice. Return ONLY the construct body: no imports, no class line, \
+no def line, no markdown fences.
+
+Authoring rules you must follow:
+{catalog_for_prompt(latex_available)}
+
+Scene narration (spoken over this animation — copy exact phrases into self.cue): {narration}
+Target duration: {duration:.1f} seconds (pace the animation to fill it).
+
+Return only the construct-body code."""
+    try:
+        if settings.anthropic_api_key and settings.default_llm_provider != "openai":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            resp = client.messages.create(
+                model=settings.anthropic_script_model,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": instruction}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), "")
+            return _strip_code_fences(text) or None
+        if settings.openai_api_key:
+            resp = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.openai_script_model,
+                    "messages": [{"role": "user", "content": instruction}],
+                    "max_tokens": 4000,
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+            return _strip_code_fences(resp.json()["choices"][0]["message"]["content"]) or None
+    except Exception:  # noqa: BLE001 — authoring is best-effort; render fails loud if empty
+        pass
+    return None
+
+
+def repair_manim_code(
+    code: str,
+    error: str,
+    narration: str,
+    duration: float,
+    latex_available: bool,
+) -> str | None:
+    """Ask the LLM to fix Manim construct-body code that failed to render.
+
+    Returns corrected code (no fences), or None if no LLM is available. Used by
+    the pipeline's bounded auto-repair loop for animation scenes.
+    """
+    from ..animation.catalog import catalog_for_prompt
+
+    instruction = f"""You authored Manim Community code — the body of construct(self) for a short \
+vertical (9:16) animation — but it FAILED to render. Fix it. Return ONLY the \
+corrected construct body: no imports, no class line, no def line, no markdown fences.
+
+Authoring rules you must follow:
+{catalog_for_prompt(latex_available)}
+
+Scene narration (use exact phrases for self.cue): {narration}
+Target duration: {duration:.1f} seconds
+
+--- The code that failed ---
+{code}
+
+--- The Manim / Python error ---
+{error}
+
+Return only the corrected construct-body code."""
+    try:
+        if settings.anthropic_api_key and settings.default_llm_provider != "openai":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            resp = client.messages.create(
+                model=settings.anthropic_script_model,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": instruction}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), "")
+            return _strip_code_fences(text) or None
+        if settings.openai_api_key:
+            resp = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.openai_script_model,
+                    "messages": [{"role": "user", "content": instruction}],
+                    "max_tokens": 4000,
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+            return _strip_code_fences(resp.json()["choices"][0]["message"]["content"]) or None
+    except Exception:  # noqa: BLE001 — repair is best-effort
+        pass
+    return None
 
 
 def ai_character_description(name: str, topic: str, content_prompt: str) -> str:

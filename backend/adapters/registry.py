@@ -13,7 +13,14 @@ from sqlmodel import Session
 from ..config import settings
 from ..database import engine
 from ..models import Setting
-from .base import ImageGenerator, ScriptGenerator, TTSGenerator, VideoGenerator
+from .animation import ManimAnimationGenerator, OfflineAnimationGenerator
+from .base import (
+    AnimationGenerator,
+    ImageGenerator,
+    ScriptGenerator,
+    TTSGenerator,
+    VideoGenerator,
+)
 from .image import (
     FalImageGenerator,
     KreaDirectImageGenerator,
@@ -111,3 +118,20 @@ def get_video_generator() -> VideoGenerator:
     if _offline_ok():
         return OfflineVideoGenerator()
     raise RuntimeError("No fal.ai API key configured and offline fallback disabled.")
+
+
+def get_animation_generator() -> AnimationGenerator:
+    """Manim by default; fall back to the offline placeholder when unavailable.
+
+    ``importlib.util.find_spec`` checks availability without paying Manim's heavy
+    import cost here — the real import happens lazily inside ``render``.
+    """
+    import importlib.util
+
+    if settings.animation_engine == "offline":
+        return OfflineAnimationGenerator()
+    if importlib.util.find_spec("manim") is not None:
+        return ManimAnimationGenerator()
+    if _offline_ok():
+        return OfflineAnimationGenerator()
+    raise RuntimeError("Manim is not installed and offline fallback is disabled.")

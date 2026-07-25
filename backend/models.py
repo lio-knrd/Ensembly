@@ -14,6 +14,8 @@ from typing import Optional
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
 
+from .config import SUBTITLE_POSITION_DEFAULT
+
 
 def _uuid() -> str:
     return str(uuid.uuid4())
@@ -47,6 +49,10 @@ class Stage(str, Enum):
 class SceneType(str, Enum):
     STILL = "still"
     VIDEO = "video"
+    # A deterministic, programmatically-rendered animation (math/science
+    # diagrams, curves, counters) instead of AI image/video. The visual is
+    # produced from a typed spec whose cues sync to the narration timestamps.
+    ANIMATION = "animation"
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +73,11 @@ class Project(SQLModel, table=True):
     music_track_id: Optional[str] = Field(default=None, foreign_key="music_tracks.id")
     music_enabled: bool = True
     music_volume: float = 0.075
+    # Burned-in subtitles. Both live on the project (never on a preset or a
+    # global setting) so a placement chosen here is scoped to this render only
+    # and every new project starts from SUBTITLE_POSITION_DEFAULT again.
+    subtitles_enabled: bool = True
+    subtitle_position: float = SUBTITLE_POSITION_DEFAULT
     title_card_path: Optional[str] = None
     title_card_source_path: Optional[str] = None
     title_card_kicker: str = ""
@@ -109,10 +120,15 @@ class Scene(SQLModel, table=True):
     timestamps_path: Optional[str] = None
     image_path: Optional[str] = None
     clip_path: Optional[str] = None
+    # For scene_type == animation: the typed, engine-agnostic animation spec
+    # (template id + params + narration-anchored cues) and its rendered clip.
+    animation_spec: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    animation_path: Optional[str] = None
     # Every generated candidate is retained. The singular paths above point at
     # the currently selected candidates used by downstream pipeline stages.
     image_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     clip_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    animation_variants: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     # Persisted fal queue state so a timeout/restart can resume without
     # submitting a duplicate paid generation.
     video_request_id: Optional[str] = None
@@ -190,6 +206,10 @@ class ContentPreset(SQLModel, table=True):
     # so scene image_prompts stay clean and the look stays consistent.
     image_style_prompt: str = ""
     voice_id: str = ""
+    # When on, the script LLM may mark scenes as deterministic animations and
+    # emit an animation spec for them. Off by default so narrative/photographic
+    # presets (e.g. mythology) never get diagrams sprinkled in.
+    enable_animations: bool = False
     is_default: bool = False
 
 

@@ -64,6 +64,12 @@ class ProjectMusicUpdate(BaseModel):
     volume: Optional[float] = None
 
 
+class ProjectSubtitlesUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    # Fraction of the frame height from the bottom edge; clamped server-side.
+    position: Optional[float] = None
+
+
 class MusicTrackSelect(BaseModel):
     provider: Literal["jamendo", "local"] = "jamendo"
     provider_track_id: str
@@ -85,6 +91,7 @@ class SceneUpdate(BaseModel):
     image_prompt: Optional[str] = None
     continuity_context: Optional[list[dict]] = None
     scene_type: Optional[SceneType] = None
+    animation_spec: Optional[dict] = None
     use_next_scene_as_end_frame: Optional[bool] = None
     approved: Optional[bool] = None
     character_ids: Optional[list[str]] = None
@@ -93,7 +100,7 @@ class SceneUpdate(BaseModel):
 
 
 class SceneAssetSelect(BaseModel):
-    kind: Literal["image", "clip", "audio"]
+    kind: Literal["image", "clip", "audio", "animation"]
     path: str
 
 
@@ -126,6 +133,7 @@ class ContentPresetIn(BaseModel):
     content_prompt: str = ""
     image_style_prompt: str = ""
     voice_id: str = ""
+    enable_animations: bool = False
     is_default: bool = False
 
 

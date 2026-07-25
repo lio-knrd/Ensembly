@@ -9,16 +9,34 @@ from sqlmodel import Session, select
 
 from ..adapters.llm import analyze_project_scope
 from ..adapters.registry import tts_voice_label
+from ..animation import normalize_spec
 from .. import pipeline
-from ..config import settings
+from ..config import (
+    SUBTITLE_POSITION_DEFAULT,
+    SUBTITLE_POSITION_MAX,
+    SUBTITLE_POSITION_MIN,
+    clamp_subtitle_position,
+    settings,
+)
 from ..database import get_session
-from ..models import Character, CharacterForm, ContentPreset, Project, ProjectCharacter, Scene, SceneType, Stage
+from ..models import (
+    Character,
+    CharacterForm,
+    ContentPreset,
+    PlatformPreset,
+    Project,
+    ProjectCharacter,
+    Scene,
+    SceneType,
+    Stage,
+)
 from ..schemas import (
     CastSheetGenerate,
     ProjectCreate,
     ProjectDetail,
     ProjectScopeAnalyze,
     ProjectSplitCreate,
+    ProjectSubtitlesUpdate,
     SceneAssetSelect,
     SceneUpdate,
     TitleCardGenerate,
@@ -229,6 +247,11 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
     project_data = project.model_dump()
     project_data["title_card_variants"] = _title_card_options(project)
     project_data["final_video_version"] = _final_video_version(project)
+    # Placement bounds/default travel with the project so the editor never has
+    # to hard-code the render geometry.
+    project_data["subtitle_position_default"] = SUBTITLE_POSITION_DEFAULT
+    project_data["subtitle_position_min"] = SUBTITLE_POSITION_MIN
+    project_data["subtitle_position_max"] = SUBTITLE_POSITION_MAX
     project_data["voice_name"] = tts_voice_label(None)
     project_data["voice_id"] = ""
     if project.content_preset_id:
@@ -375,6 +398,26 @@ def rerender(project_id: str, session: Session = Depends(get_session)):
     return {"ok": True}
 
 
+@router.patch("/{project_id}/subtitles")
+def update_subtitles(
+    project_id: str,
+    body: ProjectSubtitlesUpdate,
+    session: Session = Depends(get_session),
+):
+    """Burned-in subtitle switch + placement for this project's next render."""
+    project = _require(session, project_id)
+    if body.enabled is not None:
+        project.subtitles_enabled = bool(body.enabled)
+    if body.position is not None:
+        project.subtitle_position = clamp_subtitle_position(body.position)
+    session.add(project)
+    session.commit()
+    return {
+        "enabled": project.subtitles_enabled,
+        "position": project.subtitle_position,
+    }
+
+
 @router.post("/{project_id}/title-card")
 def generate_title_card(
     project_id: str,
@@ -453,6 +496,9 @@ def update_scene(project_id: str, scene_id: str, body: SceneUpdate, session: Ses
     if not scene or scene.project_id != project_id:
         raise HTTPException(404, "Scene not found")
     data = body.model_dump(exclude_unset=True)
+    if "animation_spec" in data:
+        # Validate/clean before storing so a bad edit can never reach the renderer.
+        data["animation_spec"] = normalize_spec(data["animation_spec"])
     for field, value in data.items():
         setattr(scene, field, value)
     session.add(scene)
@@ -485,6 +531,17 @@ def regen_clip(project_id: str, scene_id: str, session: Session = Depends(get_se
     return {"ok": True}
 
 
+@router.post("/{project_id}/scenes/{scene_id}/regenerate-animation")
+def regen_animation(project_id: str, scene_id: str, session: Session = Depends(get_session)):
+    scene = _require_scene(session, project_id, scene_id)
+    if scene.scene_type != SceneType.ANIMATION:
+        raise HTTPException(400, "Scene is not marked as animation")
+    if not normalize_spec(scene.animation_spec):
+        raise HTTPException(400, "Scene has no valid animation spec")
+    pipeline.submit(pipeline.regenerate_scene_animation, project_id, scene_id)
+    return {"ok": True}
+
+
 @router.post("/{project_id}/scenes/{scene_id}/select-asset")
 def select_scene_asset(
     project_id: str,
@@ -509,6 +566,11 @@ def select_scene_asset(
         if body.path not in options:
             raise HTTPException(400, "Unknown clip candidate")
         scene.clip_path = body.path
+    elif body.kind == "animation":
+        options = _paths_with_current(scene.animation_variants, scene.animation_path)
+        if body.path not in options:
+            raise HTTPException(400, "Unknown animation candidate")
+        scene.animation_path = body.path
     else:
         options = _audio_options(scene)
         selected = next((item for item in options if item.get("path") == body.path), None)
@@ -546,6 +608,7 @@ def _scene_payload(session: Session, project: Project, scene: Scene) -> dict:
     data = scene.model_dump()
     data["image_variants"] = _paths_with_current(scene.image_variants, scene.image_path)
     data["clip_variants"] = _paths_with_current(scene.clip_variants, scene.clip_path)
+    data["animation_variants"] = _paths_with_current(scene.animation_variants, scene.animation_path)
     data["audio_variants"] = _audio_options(scene)
     refs = []
     for ref in pipeline.scene_context_refs(session, project, scene):

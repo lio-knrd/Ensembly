@@ -10,9 +10,12 @@ from pathlib import Path
 class GeneratedScene:
     narration_text: str
     image_prompt: str
-    scene_type: str  # "still" | "video"
+    scene_type: str  # "still" | "video" | "animation"
     characters: list[dict] = field(default_factory=list)
     continuity_context: list[dict] = field(default_factory=list)
+    # Present only for scene_type == "animation": {"code", "title"} — AI-authored
+    # Manim scene code (see backend/animation/catalog.py). None for still/video.
+    animation: dict | None = None
 
 
 @dataclass
@@ -86,4 +89,29 @@ class VideoGenerator(ABC):
         `elements` — per-character identity refs as (frontal_sheet, [variants]).
         `end_image_path` — optional final frame (e.g. the next scene's still).
         """
+        ...
+
+
+class AnimationGenerator(ABC):
+    """Render a deterministic animation clip from AI-authored Manim code.
+
+    ``spec`` is ``{"code", "title"}`` from ``backend/animation/catalog.py``;
+    ``words`` is the scene's ElevenLabs word list (``[{word, start, end}, ...]``)
+    injected so the code's ``self.cue("phrase")`` can bind events to the voice.
+    The output MP4 is sized to ``duration_seconds`` at ``size`` (width, height) —
+    matched to the scene's audio like a video clip. Raises on render failure with
+    the engine's error text so callers can auto-repair.
+    """
+
+    name: str = "abstract"
+
+    @abstractmethod
+    def render(
+        self,
+        spec: dict,
+        words: list[dict],
+        out_path: Path,
+        duration_seconds: float,
+        size: tuple[int, int] = (1080, 1920),
+    ) -> Path:
         ...

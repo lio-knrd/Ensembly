@@ -233,6 +233,7 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
   const [prompt, setPrompt] = useState(preset[promptField] || "");
   const [style, setStyle] = useState(styleField ? preset[styleField] || "" : "");
   const [voiceId, setVoiceId] = useState(styleField ? preset.voice_id || "" : "");
+  const [enableAnimations, setEnableAnimations] = useState(!!preset.enable_animations);
   const [voiceSearch, setVoiceSearch] = useState("");
   const [styleAssistantOpen, setStyleAssistantOpen] = useState(false);
   const [styleGuidance, setStyleGuidance] = useState("");
@@ -254,13 +255,17 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
     name !== preset.name ||
     prompt !== (preset[promptField] || "") ||
     isDefault !== preset.is_default ||
-    (styleField && (style !== (preset[styleField] || "") || voiceId !== (preset.voice_id || "")));
+    (styleField &&
+      (style !== (preset[styleField] || "") ||
+        voiceId !== (preset.voice_id || "") ||
+        enableAnimations !== !!preset.enable_animations));
 
   const save = () => {
     setSaving(true);
     const body = { name, [promptField]: prompt, is_default: isDefault };
     if (styleField) body[styleField] = style;
     if (styleField) body.voice_id = voiceId;
+    if (styleField) body.enable_animations = enableAnimations;
     Promise.resolve(onSave(body)).finally(() => setSaving(false));
   };
 
@@ -365,6 +370,18 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
           {selectedVoice?.description && (
             <div className="voice-note">{selectedVoice.description}</div>
           )}
+          <label className="preset-field-label">Deterministic animations</label>
+          <label className="row" style={{ fontSize: 13, cursor: "pointer", gap: 8 }}>
+            <input
+              type="checkbox"
+              style={{ width: "auto" }}
+              checked={enableAnimations}
+              onChange={(e) => setEnableAnimations(e.target.checked)}
+            />
+            Let the script AI author full Manim animations (graphs, geometry,
+            equations, anything) synced to the narration, where they explain
+            better than an AI image or video.
+          </label>
         </>
       )}
       <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>

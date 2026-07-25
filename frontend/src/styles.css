@@ -1293,6 +1293,117 @@ h4 {
   color: var(--on-accent);
 }
 
+/* ---------- Subtitles ---------- */
+.subtitles-panel {
+  display: grid;
+  grid-template-columns: minmax(150px, 200px) 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.subtitle-preview {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 9 / 16;
+  border-radius: var(--radius);
+  /* Reads as a video frame in either theme, so the white captions keep their
+     contrast even before a scene image exists. */
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  /* Caption metrics below are a share of the frame height, exactly like the
+     renderer scales them against a 1920px-tall frame. */
+  container-type: size;
+}
+.subtitle-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+.subtitle-preview-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--sidebar-text-soft);
+}
+.subtitle-sample {
+  position: absolute;
+  left: 8.9%;
+  right: 8.9%;
+  display: grid;
+  justify-items: center;
+  gap: 0.3cqh;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  text-align: center;
+  font-family: Arial, Helvetica, sans-serif;
+  font-weight: 700;
+  line-height: 1.15;
+  font-size: 13px;
+  font-size: 4.1cqh;
+  color: #fff;
+  text-shadow: 0 0 0.5cqh rgba(0, 0, 0, 0.95), 0 0.2cqh 0.4cqh rgba(0, 0, 0, 0.95);
+  -webkit-text-stroke: 0.35cqh rgba(0, 0, 0, 0.85);
+  paint-order: stroke fill;
+}
+.subtitle-sample:active {
+  cursor: grabbing;
+}
+.subtitle-sample.muted-off {
+  cursor: default;
+  opacity: 0.32;
+}
+.subtitle-controls {
+  display: grid;
+  gap: 14px;
+}
+.subtitle-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+.subtitle-head h2 {
+  margin-bottom: 4px;
+}
+.subtitle-head .check-row {
+  white-space: nowrap;
+}
+.subtitle-position {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  color: var(--text-soft);
+  font-size: 12.5px;
+}
+.subtitle-position label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+}
+.subtitle-position label svg {
+  width: 15px;
+  height: 15px;
+}
+.subtitle-position input[type="range"] {
+  accent-color: var(--accent);
+  padding: 0;
+}
+.subtitle-position span {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.subtitle-hint {
+  font-size: 12.5px;
+  max-width: 62ch;
+}
+
 /* ---------- Characters ---------- */
 .character-page-head {
   align-items: flex-start;
@@ -2406,11 +2517,15 @@ input[type="checkbox"] {
 }
 
 @media (max-width: 760px) {
-  .title-card-panel {
+  .title-card-panel,
+  .subtitles-panel {
     grid-template-columns: 1fr;
   }
   .title-card-preview {
     width: min(260px, 100%);
+  }
+  .subtitle-preview {
+    width: min(220px, 100%);
   }
   .title-copy-grid {
     grid-template-columns: 1fr;
@@ -2471,4 +2586,50 @@ input[type="checkbox"] {
     width: 100%;
     max-height: 240px;
   }
+}
+
+/* Animation scene spec panel */
+.anim-spec {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12.5px;
+}
+.anim-spec-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.anim-spec-title {
+  color: var(--text-soft);
+  font-weight: 650;
+}
+.anim-spec-lines {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+.anim-spec-head .anim-spec-lines {
+  margin-left: auto;
+}
+.anim-spec-head .btn {
+  margin-left: 8px;
+}
+.anim-spec-editor {
+  margin-top: 10px;
+}
+.anim-spec-editor textarea {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.anim-spec-note {
+  margin: 8px 0 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
 }

@@ -59,6 +59,8 @@ export const api = {
     req(`/api/projects/${id}/title-card`, { method: "PATCH", body: JSON.stringify(body) }),
   selectTitleCard: (id, body) =>
     req(`/api/projects/${id}/title-card/select`, { method: "POST", body: JSON.stringify(body) }),
+  updateProjectSubtitles: (id, body) =>
+    req(`/api/projects/${id}/subtitles`, { method: "PATCH", body: JSON.stringify(body) }),
   getProjectMusic: (id) => req(`/api/projects/${id}/music`),
   updateProjectMusic: (id, body) =>
     req(`/api/projects/${id}/music`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -87,6 +89,8 @@ export const api = {
     req(`/api/projects/${pid}/scenes/${sid}/regenerate-audio`, { method: "POST" }),
   regenSceneClip: (pid, sid) =>
     req(`/api/projects/${pid}/scenes/${sid}/regenerate-clip`, { method: "POST" }),
+  regenSceneAnimation: (pid, sid) =>
+    req(`/api/projects/${pid}/scenes/${sid}/regenerate-animation`, { method: "POST" }),
   selectSceneAsset: (pid, sid, body) =>
     req(`/api/projects/${pid}/scenes/${sid}/select-asset`, {
       method: "POST",

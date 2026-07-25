@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowRight,
+  Captions,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -10,6 +11,7 @@ import {
   ImageOff,
   Music,
   RefreshCw,
+  RotateCcw,
   Undo2,
   UserRound,
   X,
@@ -84,7 +86,8 @@ export default function ProjectDetail() {
 
       <StageProgress stage={project.stage} />
       <StageBar project={project} scenes={scenes} />
-      {showSoundtrack(project.stage) && <SoundtrackPanel projectId={id} />}
+      {showRenderPanels(project.stage) && <SoundtrackPanel projectId={id} />}
+      {showRenderPanels(project.stage) && <SubtitlesPanel project={project} scenes={scenes} />}
       {scenes.some((scene) => scene.image_path) && (
         <TitleCardPanel project={project} scenes={scenes} />
       )}
@@ -113,7 +116,7 @@ export default function ProjectDetail() {
   );
 }
 
-function showSoundtrack(stage) {
+function showRenderPanels(stage) {
   return !["IDEA", "SCRIPT_GENERATING"].includes(stage);
 }
 
@@ -901,6 +904,202 @@ function licenseName(url) {
   return "CC";
 }
 
+// Mirrors the renderer's caption wrapping (24 chars, at most two lines) so the
+// preview block matches the size of what actually gets burned in.
+const SAMPLE_LINE_CHARS = 24;
+
+function sampleCaptionLines(scenes) {
+  const source =
+    scenes.find((scene) => (scene.narration_text || "").trim())?.narration_text ||
+    "Your narration appears here";
+  const lines = [];
+  let current = "";
+  for (const word of source.trim().split(/\s+/)) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (current && candidate.length > SAMPLE_LINE_CHARS) {
+      lines.push(current);
+      if (lines.length === 2) return lines;
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function SubtitlesPanel({ project, scenes }) {
+  const qc = useQueryClient();
+  const projectQueryKey = ["project", project.id];
+  const defaultPosition = project.subtitle_position_default ?? 0.128;
+  const minPosition = project.subtitle_position_min ?? 0.02;
+  const maxPosition = project.subtitle_position_max ?? 0.85;
+  const clamp = (value) => Math.min(Math.max(value, minPosition), maxPosition);
+
+  const enabled = project.subtitles_enabled !== false;
+  const saved = clamp(project.subtitle_position ?? defaultPosition);
+  const [position, setPosition] = useState(saved);
+  // Mirrored in a ref because a pointerup can land in the same task as the last
+  // pointermove, before a re-render hands the handler a fresh closure.
+  const livePosition = useRef(saved);
+  const frameRef = useRef(null);
+  const grabOffset = useRef(null);
+
+  const update = useMutation({
+    mutationFn: (body) => api.updateProjectSubtitles(project.id, body),
+    onSuccess: (data) =>
+      qc.setQueryData(projectQueryKey, (current) =>
+        current
+          ? {
+              ...current,
+              project: {
+                ...current.project,
+                subtitles_enabled: data.enabled,
+                subtitle_position: data.position,
+              },
+            }
+          : current
+      ),
+  });
+
+  // Follow the server value unless the user is mid-drag.
+  useEffect(() => {
+    if (grabOffset.current !== null) return;
+    livePosition.current = saved;
+    setPosition(saved);
+  }, [saved]);
+
+  const move = (value) => {
+    livePosition.current = value;
+    setPosition(value);
+  };
+  const commit = () => {
+    const value = livePosition.current;
+    if (Math.abs(value - saved) < 0.0005) return;
+    update.mutate({ position: Number(value.toFixed(3)) });
+  };
+
+  const startDrag = (event) => {
+    if (!enabled) return;
+    const box = event.currentTarget.getBoundingClientRect();
+    grabOffset.current = event.clientY - box.bottom;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onDrag = (event) => {
+    const frame = frameRef.current;
+    if (grabOffset.current === null || !frame) return;
+    const rect = frame.getBoundingClientRect();
+    if (!rect.height) return;
+    const bottomY = event.clientY - grabOffset.current;
+    move(clamp((rect.bottom - bottomY) / rect.height));
+  };
+  const endDrag = (event) => {
+    if (grabOffset.current === null) return;
+    grabOffset.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    commit();
+  };
+
+  const backdropScene = scenes.find((scene) => scene.image_path);
+  const backdrop =
+    mediaUrl(backdropScene?.image_path, backdropScene?.asset_version) ||
+    mediaUrl(project.title_card_path, project.title_card_version);
+  const lines = sampleCaptionLines(scenes);
+  const isDefault = Math.abs(saved - defaultPosition) < 0.0005;
+
+  return (
+    <div className="panel subtitles-panel">
+      <div
+        className="subtitle-preview"
+        ref={frameRef}
+        aria-label="Subtitle placement preview"
+      >
+        {backdrop ? (
+          <img src={backdrop} alt="" />
+        ) : (
+          <div className="subtitle-preview-empty">No scene image yet</div>
+        )}
+        <div
+          className={"subtitle-sample" + (enabled ? "" : " muted-off")}
+          style={{ bottom: `${position * 100}%` }}
+          onPointerDown={startDrag}
+          onPointerMove={onDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
+          {lines.map((line, index) => (
+            <span key={index}>{line}</span>
+          ))}
+        </div>
+      </div>
+
+      <div className="subtitle-controls">
+        <div className="subtitle-head">
+          <div>
+            <h2>Subtitles</h2>
+            <div className="panel-sub">
+              {enabled
+                ? "Burned in from the narration timestamps"
+                : "Not burned into this render"}
+            </div>
+          </div>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={update.isPending}
+              onChange={(event) => update.mutate({ enabled: event.target.checked })}
+            />
+            Burn into render
+          </label>
+        </div>
+
+        <div className="subtitle-position">
+          <label htmlFor="subtitle-position">
+            <Captions />
+            Position
+          </label>
+          <input
+            id="subtitle-position"
+            type="range"
+            min={minPosition}
+            max={maxPosition}
+            step="0.005"
+            value={position}
+            disabled={!enabled}
+            onChange={(event) => move(Number(event.target.value))}
+            onPointerUp={commit}
+            onKeyUp={commit}
+            onBlur={commit}
+          />
+          <span>{Math.round(position * 100)}% from bottom</span>
+        </div>
+
+        <div className="row">
+          <button
+            className="btn sm"
+            disabled={!enabled || isDefault || update.isPending}
+            onClick={() => {
+              move(defaultPosition);
+              commit();
+            }}
+          >
+            <RotateCcw />
+            {isDefault ? "Default position" : "Reset to default"}
+          </button>
+        </div>
+
+        <div className="muted subtitle-hint">
+          Drag the caption in the preview, or use the slider. This placement is
+          saved for this project only; every new project starts at the default.
+          {project.stage === "DONE" ? " Re-render to apply it." : ""}
+        </div>
+        {update.error && <span className="banner compact">{update.error.message}</span>}
+      </div>
+    </div>
+  );
+}
+
 function FinalPanel({ project, metadata }) {
   const folder = project.folder_path;
   const slug = (project.title || "video")
@@ -992,6 +1191,10 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
     mutationFn: () => api.regenSceneClip(projectId, scene.id),
     onSuccess: invalidate,
   });
+  const regenAnimation = useMutation({
+    mutationFn: () => api.regenSceneAnimation(projectId, scene.id),
+    onSuccess: invalidate,
+  });
   const selectAsset = useMutation({
     mutationFn: ({ kind, path }) =>
       api.selectSceneAsset(projectId, scene.id, { kind, path }),
@@ -1001,14 +1204,19 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
   const mediaVersion = scene.asset_version || 0;
   const img = mediaUrl(scene.image_path, mediaVersion);
   const clip = mediaUrl(scene.clip_path, mediaVersion);
+  const animation = mediaUrl(scene.animation_path, mediaVersion);
   const audio = mediaUrl(scene.audio_path, mediaVersion);
+  const isAnimation = scene.scene_type === "animation";
   const showClip = clip && scene.scene_type === "video";
+  const showAnimation = animation && isAnimation;
   const busy = scene.status === "generating";
   const contextRefs = scene.context_refs || [];
   const continuityContext = scene.continuity_context || [];
   const excludedContextIds = scene.excluded_context_scene_ids || [];
   const imageVariants = scene.image_variants || [];
   const clipVariants = scene.clip_variants || [];
+  const animationVariants = scene.animation_variants || [];
+  const animationSpec = scene.animation_spec || null;
   const audioVariants = scene.audio_variants || [];
 
   const setContextExcluded = (sceneId, excluded) => {
@@ -1028,8 +1236,13 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
           ) : showClip ? (
             <video src={clip} muted loop playsInline
               onMouseOver={(e) => e.target.play()} onMouseOut={(e) => e.target.pause()} />
+          ) : showAnimation ? (
+            <video src={animation} muted loop playsInline
+              onMouseOver={(e) => e.target.play()} onMouseOut={(e) => e.target.pause()} />
           ) : img ? (
             <img src={img} alt="" />
+          ) : isAnimation ? (
+            "animation renders at storyboard"
           ) : (
             "no image"
           )}
@@ -1052,6 +1265,16 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             activePath={scene.clip_path}
             pending={selectAsset.isPending || busy}
             onSelect={(path) => selectAsset.mutate({ kind: "clip", path })}
+          />
+        )}
+        {isAnimation && animationVariants.length > 1 && (
+          <AssetVariants
+            label="Animations"
+            kind="clip"
+            paths={animationVariants}
+            activePath={scene.animation_path}
+            pending={selectAsset.isPending || busy}
+            onSelect={(path) => selectAsset.mutate({ kind: "animation", path })}
           />
         )}
       </div>
@@ -1142,6 +1365,15 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             >
               Video
             </button>
+            {(animationSpec || isAnimation) && (
+              <button
+                className={isAnimation ? "on" : ""}
+                onClick={() => save.mutate({ scene_type: "animation" })}
+                title="Deterministic math/science animation synced to the narration"
+              >
+                Animation
+              </button>
+            )}
           </div>
           {scene.scene_type === "video" && hasNextScene && (
             <label
@@ -1166,6 +1398,13 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             <span className="tag">new character: {scene.suggested_characters.join(", ")}</span>
           )}
         </div>
+        {isAnimation && animationSpec && (
+          <AnimationSpecEditor
+            spec={animationSpec}
+            pending={save.isPending || busy}
+            onSave={(next) => save.mutate({ animation_spec: next })}
+          />
+        )}
         {audio && <AudioPlayer src={audio} />}
         {audioVariants.length > 1 && (
           <label className="audio-variant-select">
@@ -1214,7 +1453,70 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             Regen clip
           </button>
         )}
+        {isAnimation && animationSpec && (
+          <button className="btn sm" disabled={regenAnimation.isPending || busy} onClick={() => regenAnimation.mutate()}>
+            <RefreshCw />
+            Regen animation
+          </button>
+        )}
       </div>
+    </div>
+  );
+}
+
+function AnimationSpecEditor({ spec, pending, onSave }) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState(spec.code || "");
+
+  useEffect(() => {
+    setCode(spec.code || "");
+  }, [spec.code]);
+
+  const dirty = code !== (spec.code || "");
+  const lineCount = (spec.code || "").split("\n").length;
+
+  return (
+    <div className="anim-spec">
+      <div className="anim-spec-head">
+        <span className="tag">Manim code</span>
+        {spec.title && <span className="anim-spec-title">{spec.title}</span>}
+        <span className="anim-spec-lines">{lineCount} lines</span>
+        <button type="button" className="btn ghost sm" onClick={() => setOpen((o) => !o)}>
+          {open ? "Hide code" : "Edit code"}
+        </button>
+      </div>
+      {open && (
+        <div className="anim-spec-editor">
+          <textarea
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            spellCheck={false}
+            rows={16}
+          />
+          <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+            <button
+              className="btn sm"
+              disabled={pending || !dirty}
+              onClick={() => setCode(spec.code || "")}
+            >
+              Reset
+            </button>
+            <button
+              className="btn sm primary"
+              disabled={pending || !dirty}
+              onClick={() => onSave({ code, title: spec.title || "" })}
+            >
+              Save code
+            </button>
+          </div>
+          <p className="anim-spec-note">
+            Full Manim: the body of construct(self). Sync to the voice with
+            self.play_at(self.cue(&quot;phrase&quot;), ...), quoting the
+            narration verbatim and in spoken order. After saving, click
+            &ldquo;Regen animation&rdquo; to re-render.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

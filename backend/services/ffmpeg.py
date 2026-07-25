@@ -4,7 +4,8 @@
   scene's exact audio duration.
 - Generated clips are used as-is, trimmed/padded to match the audio.
 - Segments are concatenated, `full_narration.mp3` is muxed in, and word-synced
-  captions are burned from the merged timestamp timeline.
+  captions are burned from the merged timestamp timeline (unless the project
+  has subtitles switched off).
 """
 from __future__ import annotations
 
@@ -14,6 +15,8 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+from ..config import SUBTITLE_POSITION_DEFAULT, clamp_subtitle_position
 
 W, H, FPS = 1080, 1920, 30
 VOICE_FADE_IN_SECONDS = 1.8
@@ -200,8 +203,15 @@ def build_ass_captions(
     max_span: float = 4.2,
     max_line_chars: int = 24,
     max_lines: int = 2,
+    position: float = SUBTITLE_POSITION_DEFAULT,
 ) -> Path:
-    """Group word timings into sentence-aware caption events and write ASS."""
+    """Group word timings into sentence-aware caption events and write ASS.
+
+    `position` places the caption block vertically as a fraction of the frame
+    height from the bottom edge; with the bottom-centre alignment used here it
+    maps straight onto the style's MarginV.
+    """
+    margin_v = int(round(clamp_subtitle_position(position) * H))
     header = (
         "[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\n"
         "WrapStyle: 0\n\n"
@@ -211,9 +221,9 @@ def build_ass_captions(
         "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
         "MarginL, MarginR, MarginV, Encoding\n"
         "Style: Caption,Arial,78,&H00FFFFFF,&H000000FF,&H00000000,&HA0000000,"
-        "-1,0,0,0,100,100,0,0,1,7,3,2,96,96,245,1\n\n"
+        "-1,0,0,0,100,100,0,0,1,7,3,2,96,96,%d,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    ) % (W, H)
+    ) % (W, H, margin_v)
 
     lines: list[str] = []
     words = timeline.get("words", [])

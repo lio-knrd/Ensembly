@@ -20,12 +20,14 @@ from sqlmodel import Session, select
 
 from . import prompts
 from .adapters import (
+    get_animation_generator,
     get_image_generator,
     get_script_generator,
     get_tts_generator,
     get_video_generator,
 )
-from .adapters.llm import ai_character_description
+from .animation import normalize_spec
+from .adapters.llm import ai_character_description, author_manim_code, repair_manim_code
 from .config import settings
 from .database import engine
 from .events import bus
@@ -659,6 +661,70 @@ def _write_project_snapshot(project: Project, folder: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Stage 1 — Script generation
 # --------------------------------------------------------------------------- #
+def _merge_consecutive_animations(scenes: list) -> list:
+    """Combine each maximal run of consecutive animation scenes into one scene.
+
+    Done deterministically at the script level — before audio — so a continuous
+    diagram explanation becomes a single animation scene with one narration and,
+    later, one audio take + one authored Manim program. Nothing is merged at the
+    code level because no code exists yet (it is authored after audio). Non-
+    animation scenes pass through untouched; continuity ``source_scene`` numbers
+    are remapped to the post-merge scene numbering.
+    """
+    from .adapters.base import GeneratedScene
+
+    old_to_new: dict[int, int] = {}
+    merged: list = []
+    i = 0
+    while i < len(scenes):
+        new_number = len(merged) + 1
+        if scenes[i].scene_type != "animation":
+            old_to_new[i + 1] = new_number
+            merged.append(scenes[i])
+            i += 1
+            continue
+        run = []
+        while i < len(scenes) and scenes[i].scene_type == "animation":
+            old_to_new[i + 1] = new_number
+            run.append(scenes[i])
+            i += 1
+        if len(run) == 1:
+            merged.append(run[0])
+            continue
+        narration = " ".join(s.narration_text.strip() for s in run if s.narration_text.strip())
+        image_prompt = next((s.image_prompt.strip() for s in run if s.image_prompt.strip()), "")
+        characters: list[dict] = []
+        seen: set[str] = set()
+        continuity: list[dict] = []
+        for s in run:
+            for ch in s.characters:
+                key = str(ch.get("name", "")).lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    characters.append(ch)
+            continuity.extend(s.continuity_context)
+        merged.append(
+            GeneratedScene(
+                narration_text=narration,
+                image_prompt=image_prompt,
+                scene_type="animation",
+                characters=characters,
+                continuity_context=continuity,
+                animation=None,
+            )
+        )
+
+    # Remap continuity references to the new numbering; drop self/dangling links.
+    for index, scene in enumerate(merged, start=1):
+        remapped = []
+        for item in scene.continuity_context:
+            src = old_to_new.get(item.get("source_scene"))
+            if src and src != index:
+                remapped.append({**item, "source_scene": src})
+        scene.continuity_context = remapped
+    return merged
+
+
 def generate_script(project_id: str) -> None:
     with Session(engine) as session:
         project = session.get(Project, project_id)
@@ -674,6 +740,7 @@ def generate_script(project_id: str) -> None:
         session.add(project)
         session.commit()
 
+        enable_animations = bool(content and content.enable_animations)
         try:
             gen = get_script_generator()
             user_prompt = prompts.build_script_prompt(
@@ -681,11 +748,13 @@ def generate_script(project_id: str) -> None:
                 content.content_prompt if content else "",
                 project.topic_prompt,
                 project.target_duration_seconds,
+                enable_animations=enable_animations,
+                latex_available=_latex_available(),
             )
             script = gen.generate(
                 prompts.CORE_SYSTEM_PROMPT,
                 user_prompt,
-                prompts.SCRIPT_JSON_SCHEMA,
+                prompts.build_script_schema(enable_animations),
                 project.topic_prompt,
                 project.target_duration_seconds,
             )
@@ -696,6 +765,12 @@ def generate_script(project_id: str) -> None:
             return
         if _stop_if_canceled(session, project):
             return
+
+        # Collapse runs of consecutive animation scenes into one scene so each
+        # renders as a single continuous animation with one voice take. Code is
+        # authored later (post-audio), so this is a pure narration/structure merge.
+        if enable_animations:
+            script.scenes = _merge_consecutive_animations(script.scenes)
 
         generated_title = str(script.metadata.get("title", "")).strip()
         if generated_title and not project.title_is_custom:
@@ -766,6 +841,7 @@ def generate_script(project_id: str) -> None:
                     image_prompt=s.image_prompt,
                     continuity_context=s.continuity_context,
                     scene_type=SceneType(s.scene_type),
+                    animation_spec=s.animation,
                     character_ids=matched,
                     character_assignments=assignments,
                     suggested_characters=suggested,
@@ -970,7 +1046,12 @@ def _audio_ready(scenes: list[Scene]) -> bool:
 
 
 def _storyboard_ready(scenes: list[Scene]) -> bool:
-    return bool(scenes) and all(_asset_exists(scene.image_path) for scene in scenes)
+    def ready(scene: Scene) -> bool:
+        if scene.scene_type == SceneType.ANIMATION:
+            return _asset_exists(scene.animation_path)
+        return _asset_exists(scene.image_path)
+
+    return bool(scenes) and all(ready(scene) for scene in scenes)
 
 
 def _clips_ready(scenes: list[Scene]) -> bool:
@@ -1397,6 +1478,16 @@ def generate_storyboard(project_id: str) -> None:
             for scene in scenes:
                 if _stop_if_canceled(session, project):
                     return
+                # Animation scenes render deterministically from their spec here
+                # (the audio stage already produced the timestamps the cues need)
+                # instead of going through image generation.
+                if scene.scene_type == SceneType.ANIMATION:
+                    if _asset_exists(scene.animation_path):
+                        _save_scene_ready(session, project, scene)
+                        continue
+                    if not _render_scene_animation(session, project, scene, folder):
+                        return
+                    continue
                 out = folder / "images" / f"scene_{scene.order_index + 1:02d}.png"
                 if _asset_exists(scene.image_path):
                     _save_scene_ready(session, project, scene)
@@ -1477,6 +1568,116 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
     if previous != scene.image_path and scene.scene_type == SceneType.VIDEO:
         scene.clip_variants = _paths_with(scene.clip_variants, scene.clip_path)
         scene.clip_path = None
+    scene.status = "ready"
+    scene.asset_version = (scene.asset_version or 0) + 1
+    session.add(scene)
+    session.commit()
+    bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
+    return True
+
+
+def _latex_available() -> bool:
+    """Whether a LaTeX distribution is available (enables MathTex/Tex)."""
+    from .animation.latex import latex_available
+
+    return latex_available()
+
+
+def _load_timestamps(scene: Scene) -> dict:
+    """The scene's ElevenLabs word timings (empty if not generated yet)."""
+    path = _asset_path(scene.timestamps_path)
+    if path and path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {"words": [], "duration": scene.duration_seconds or 0.0}
+
+
+# Initial attempt + this many LLM auto-repair retries for failing animation code.
+_ANIMATION_REPAIR_ATTEMPTS = 2
+
+
+def _persist_animation_code(session, scene: Scene, spec: dict, code: str) -> None:
+    scene.animation_spec = {"code": code, "title": spec.get("title", "")}
+    session.add(scene)
+    session.commit()
+
+
+def _render_scene_animation(session, project: Project, scene: Scene, folder: Path) -> bool:
+    """Author (if needed) and render one animation scene, synced to its voice.
+
+    The Manim code is authored HERE — in the storyboard stage, after narration
+    audio + word timestamps exist — from the scene's (merged) narration, not
+    during script generation. On a render failure the code + error are sent back
+    to the LLM to fix, up to ``_ANIMATION_REPAIR_ATTEMPTS`` times; a successful
+    author/repair is persisted so the UI shows the working code.
+    """
+    if _stop_if_canceled(session, project):
+        return False
+
+    duration = scene.duration_seconds or _timestamp_duration(_asset_path(scene.timestamps_path)) or 6.0
+    words = _load_timestamps(scene).get("words", [])
+    latex = _latex_available()
+
+    spec = normalize_spec(scene.animation_spec)
+    if not spec:
+        # No code yet (the normal path now): write it against the real narration
+        # and length. Any existing code (a user edit / older project) is reused.
+        _set_msg(session, project, f"Writing animation for scene {scene.order_index + 1}…")
+        authored = author_manim_code(scene.narration_text, duration, latex)
+        spec = normalize_spec({"code": authored, "title": ""}) if authored else None
+        if spec:
+            _persist_animation_code(session, scene, spec, spec["code"])
+    if not spec:
+        _fail(
+            session,
+            project,
+            "animation render",
+            ValueError(f"Scene {scene.order_index + 1} has no valid animation code"),
+        )
+        return False
+
+    bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="animation")
+    scene.status = "generating"
+    session.add(scene)
+    session.commit()
+
+    generator = get_animation_generator()
+    title = spec.get("title", "")
+    code = spec["code"]
+    out = _candidate_path(folder, "animations", f"scene_{scene.order_index + 1:02d}", ".mp4")
+
+    result = None
+    last_error = ""
+    for attempt in range(_ANIMATION_REPAIR_ATTEMPTS + 1):
+        if _stop_if_canceled(session, project):
+            return False
+        try:
+            result = generator.render({"code": code, "title": title}, words, out, duration)
+            break
+        except Exception as exc:  # noqa: BLE001 — capture to feed the repair loop
+            last_error = str(exc)
+        if attempt >= _ANIMATION_REPAIR_ATTEMPTS:
+            break
+        _set_msg(session, project, f"Animation code error — auto-repairing (try {attempt + 1})…")
+        repaired = repair_manim_code(code, last_error, scene.narration_text, duration, latex)
+        if not repaired or repaired.strip() == code.strip():
+            break
+        code = repaired
+        _persist_animation_code(session, scene, spec, code)  # show the fix in the UI
+
+    if result is None:
+        if _stop_if_canceled(session, project):
+            return False
+        _fail(session, project, "animation render", RuntimeError(last_error or "render failed"))
+        return False
+
+    if code != spec["code"]:
+        _persist_animation_code(session, scene, spec, code)
+    previous = scene.animation_path
+    scene.animation_path = _rel(result)
+    scene.animation_variants = _paths_with(scene.animation_variants, previous, scene.animation_path)
     scene.status = "ready"
     scene.asset_version = (scene.asset_version or 0) + 1
     session.add(scene)
@@ -1917,6 +2118,9 @@ def render(project_id: str) -> None:
                 seg = seg_dir / f"seg_{scene.order_index + 1:02d}.mp4"
                 if scene.scene_type == SceneType.VIDEO and scene.clip_path and (root / scene.clip_path).exists():
                     ffmpeg._normalize_clip(root / scene.clip_path, seg, duration)
+                elif scene.scene_type == SceneType.ANIMATION and scene.animation_path and (root / scene.animation_path).exists():
+                    # Already an MP4 sized to the scene; normalize to WxH/fps like a clip.
+                    ffmpeg._normalize_clip(root / scene.animation_path, seg, duration)
                 elif scene.image_path and (root / scene.image_path).exists():
                     ffmpeg.ken_burns_clip(root / scene.image_path, seg, duration)
                 else:
@@ -1930,7 +2134,15 @@ def render(project_id: str) -> None:
             durations = [s.duration_seconds or 0.0 for s in scenes]
             timeline = ffmpeg.merge_timestamps(ts_files, durations)
             (folder / "audio" / "timeline.json").write_text(json.dumps(timeline, indent=2), encoding="utf-8")
-            captions = ffmpeg.build_ass_captions(timeline, folder / "final" / "captions.ass")
+            # Left as None when subtitles are off, so a captions.ass written by
+            # an earlier render is never picked back up.
+            captions = None
+            if project.subtitles_enabled:
+                captions = ffmpeg.build_ass_captions(
+                    timeline,
+                    folder / "final" / "captions.ass",
+                    position=project.subtitle_position,
+                )
 
             narration = folder / "audio" / "full_narration.mp3"
             # The selected take may have changed since the last TTS generation.
@@ -2133,6 +2345,22 @@ def regenerate_scene_clip(project_id: str, scene_id: str) -> None:
         _generate_scene_clip_job(project_id, scene_id, force=True)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
+
+
+def regenerate_scene_animation(project_id: str, scene_id: str) -> None:
+    """Re-render one animation scene (e.g. after its spec or audio changed)."""
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        scene = session.get(Scene, scene_id)
+        if not project or not scene:
+            return
+        folder = _folder(project)
+        try:
+            _render_scene_animation(session, project, scene, folder)
+        except Exception:  # noqa: BLE001
+            if _stop_if_canceled(session, project):
+                return
+            traceback.print_exc()
 
 
 def _rel(path: Path) -> str:

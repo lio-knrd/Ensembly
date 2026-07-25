@@ -26,6 +26,28 @@ def _bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# --------------------------------------------------------------------------- #
+# Burned-in subtitles
+# --------------------------------------------------------------------------- #
+# Vertical placement of the caption block, as a fraction of the frame height
+# measured from the bottom edge (0 = frame bottom, 1 = frame top). This is a
+# *constant*, not a DB-backed setting: a project's placement is stored on the
+# project itself, so adjusting one project never moves the starting point for
+# the next one — every new project opens at the default below.
+SUBTITLE_POSITION_DEFAULT = 0.128  # 245px on a 1920px-tall frame
+SUBTITLE_POSITION_MIN = 0.02
+SUBTITLE_POSITION_MAX = 0.85
+
+
+def clamp_subtitle_position(value: float | None) -> float:
+    """Coerce any stored/submitted placement into the renderable range."""
+    try:
+        position = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return SUBTITLE_POSITION_DEFAULT
+    return max(SUBTITLE_POSITION_MIN, min(position, SUBTITLE_POSITION_MAX))
+
+
 class Settings(BaseModel):
     # --- Secrets (only source of API keys) ---
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -68,6 +90,14 @@ class Settings(BaseModel):
     # TTS (ElevenLabs voice + model)
     elevenlabs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
     elevenlabs_model: str = "eleven_multilingual_v2"
+    # Narration longer than this many characters is synthesized in multiple
+    # requests (ElevenLabs caps a single request at ~10,000 chars) and stitched
+    # back into one audio file + one merged timeline. Sentences are packed up to
+    # this soft target, so a whole animation run usually stays a single request.
+    elevenlabs_max_chars_per_request: int = int(os.getenv("ELEVENLABS_MAX_CHARS", "5000"))
+    # Deterministic animation engine for animation scenes: "manim" (default,
+    # requires the optional manim package) or "offline" (Pillow placeholder).
+    animation_engine: str = os.getenv("ANIMATION_ENGINE", "manim").strip().lower()
 
     @property
     def root_dir(self) -> Path:
