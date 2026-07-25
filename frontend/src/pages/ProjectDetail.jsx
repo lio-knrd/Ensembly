@@ -13,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Undo2,
+  Upload,
   UserRound,
   X,
 } from "lucide-react";
@@ -1156,6 +1157,114 @@ function FinalPanel({ project, metadata }) {
           )}
         </div>
       </div>
+      <TikTokPublish project={project} />
+    </div>
+  );
+}
+
+function TikTokPublish({ project }) {
+  const { data: target } = useQuery({
+    queryKey: ["tiktok-target", project.id],
+    queryFn: () => api.tiktokPublishTarget(project.id),
+  });
+  const [caption, setCaption] = useState("");
+  const [privacy, setPrivacy] = useState("SELF_ONLY");
+  const [result, setResult] = useState(null);
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    if (target?.suggested_caption) setCaption(target.suggested_caption);
+  }, [target?.suggested_caption]);
+
+  const publish = useMutation({
+    mutationFn: () =>
+      api.tiktokPublish(project.id, { caption, privacy_level: privacy }),
+    onSuccess: (data) => {
+      setResult(data);
+      setStatus(null);
+    },
+  });
+  const check = useMutation({
+    mutationFn: () => api.tiktokPublishStatus(project.id, result.publish_id),
+    onSuccess: (data) => setStatus(data),
+  });
+
+  if (!target) return null;
+
+  const blocked = !target.configured
+    ? "TikTok is not configured in .env."
+    : !target.group
+    ? "This project has no content preset, so there is no account to post as."
+    : !target.account
+    ? `The "${target.group.name}" group has no TikTok account selected. Pick one in Settings.`
+    : !target.video_ready
+    ? "No finished video to publish yet."
+    : "";
+
+  return (
+    <div className="panel-inset">
+      <h3>Publish to TikTok</h3>
+      {blocked ? (
+        <div className="banner compact">{blocked}</div>
+      ) : (
+        <>
+          <div className="key-row">
+            <span>
+              Posting as <strong>{target.account.display_name || target.account.open_id}</strong>
+              {" via "}
+              {target.group.name}
+            </span>
+            <span className="model-code">{Math.round(target.video_bytes / 1048576)} MB</span>
+          </div>
+          <div className="field">
+            <label>Caption</label>
+            <textarea value={caption} onChange={(e) => setCaption(e.target.value)} />
+          </div>
+          <div className="field">
+            <label>Privacy</label>
+            <select value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
+              {target.privacy_levels.map((level) => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
+          </div>
+          {publish.isError && <div className="banner compact">{String(publish.error.message)}</div>}
+          {check.isError && <div className="banner compact">{String(check.error.message)}</div>}
+          <div className="row">
+            <button
+              className="btn primary"
+              disabled={publish.isPending || !caption.trim()}
+              onClick={() => publish.mutate()}
+            >
+              <Upload />
+              {publish.isPending ? "Uploading..." : "Publish"}
+            </button>
+            {result && (
+              <button className="btn" disabled={check.isPending} onClick={() => check.mutate()}>
+                <RefreshCw />
+                {check.isPending ? "Checking..." : "Check status"}
+              </button>
+            )}
+          </div>
+          {result && (
+            <div className="key-row">
+              <span>Publish id</span>
+              <span className="model-code">{result.publish_id}</span>
+            </div>
+          )}
+          {status && (
+            <div className="key-row">
+              <span>Status</span>
+              <span className="model-code">
+                {status.status}
+                {status.fail_reason ? ` (${status.fail_reason})` : ""}
+              </span>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

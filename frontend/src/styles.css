@@ -2373,6 +2373,18 @@ input[type="checkbox"] {
 .preset-item textarea {
   min-height: 64px;
 }
+/* A secondary block inside a panel (e.g. publishing under the final video) */
+.panel-inset {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.panel-inset h3 {
+  font-size: 14px;
+  margin: 0 0 10px;
+}
 .style-assistant {
   margin-top: 8px;
   padding: 10px;

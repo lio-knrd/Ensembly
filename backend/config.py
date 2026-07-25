@@ -62,6 +62,19 @@ class Settings(BaseModel):
     ).strip()
     jamendo_secret: str = (os.getenv("JAMENDO_SECRET") or os.getenv("JAMEDO_SECRET") or "").strip()
 
+    # --- TikTok (Login Kit + Content Posting API) ---
+    # One developer app authorizes many creator accounts; the per-account tokens
+    # live in the database, so only the app credentials belong here.
+    tiktok_client_key: str = os.getenv("TIKTOK_CLIENT_KEY", "").strip()
+    tiktok_client_secret: str = os.getenv("TIKTOK_CLIENT_SECRET", "").strip()
+    # TikTok only accepts absolute https redirect URIs registered on the app —
+    # http/localhost is rejected, so a local install needs a tunnel or the
+    # paste-the-redirected-URL fallback in the linking UI.
+    tiktok_redirect_uri: str = os.getenv("TIKTOK_REDIRECT_URI", "").strip()
+    # PKCE is required for mobile/desktop client types and rejected by some web
+    # client configurations, so it follows the app's registered type.
+    tiktok_use_pkce: bool = _bool(os.getenv("TIKTOK_USE_PKCE"), False)
+
     default_llm_provider: str = os.getenv("DEFAULT_LLM_PROVIDER", "anthropic").strip().lower()
 
     # --- App config ---
@@ -126,6 +139,7 @@ class Settings(BaseModel):
             "fal": bool(self.fal_api_key),
             "krea": bool(self.krea_api_key),
             "jamendo": bool(self.jamendo_client_id),
+            "tiktok": bool(self.tiktok_client_key and self.tiktok_client_secret),
         }
 
 

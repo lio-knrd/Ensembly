@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Minus, Plus, Sparkles } from "lucide-react";
+import { Check, Link2, Minus, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
 import AudioPlayer from "../components/AudioPlayer.jsx";
@@ -42,6 +42,7 @@ export default function Settings() {
 
       <PresetSection kind="platform" />
       <PresetSection kind="content" />
+      <TikTokPanel />
 
       <div className="panel">
         <h2>Defaults</h2>
@@ -162,6 +163,159 @@ export default function Settings() {
   );
 }
 
+function TikTokPanel() {
+  const qc = useQueryClient();
+  const { data: status } = useQuery({ queryKey: ["tiktok"], queryFn: api.tiktokStatus });
+  const [pending, setPending] = useState(null); // { url, state } while a login is open
+  const [pastedUrl, setPastedUrl] = useState("");
+  const [error, setError] = useState("");
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["tiktok"] });
+    qc.invalidateQueries({ queryKey: ["contentPresets"] });
+  };
+
+  const start = useMutation({
+    mutationFn: () => api.tiktokLinkStart({}),
+    onSuccess: (data) => {
+      setError("");
+      setPending(data);
+      window.open(data.url, "_blank", "noopener");
+    },
+    onError: (err) => setError(err.message),
+  });
+  const complete = useMutation({
+    mutationFn: () =>
+      api.tiktokLinkComplete({ redirected_url: pastedUrl.trim(), state: pending?.state }),
+    onSuccess: () => {
+      setError("");
+      setPending(null);
+      setPastedUrl("");
+      invalidate();
+    },
+    onError: (err) => setError(err.message),
+  });
+
+  if (!status) return null;
+
+  return (
+    <div className="panel">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div>
+          <h2>TikTok publishing</h2>
+          <p className="panel-sub">
+            Accounts are linked once here, then any content preset picks one to
+            post as. Linking the same account twice is never needed.
+          </p>
+        </div>
+        <button
+          className="btn sm"
+          disabled={!status.configured || start.isPending}
+          onClick={() => start.mutate()}
+          title={status.configured ? undefined : "Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET first"}
+        >
+          <Link2 />
+          {start.isPending ? "Opening..." : "Link account"}
+        </button>
+      </div>
+
+      {!status.configured && (
+        <div className="banner compact">
+          Set <code>TIKTOK_CLIENT_KEY</code> and <code>TIKTOK_CLIENT_SECRET</code> in
+          <code> .env</code> (from your TikTok developer app), then restart.
+        </div>
+      )}
+      {status.configured && !status.redirect_uri && (
+        <div className="banner compact">
+          Set <code>TIKTOK_REDIRECT_URI</code> to the https URL registered on your
+          TikTok app. TikTok rejects http and localhost redirects.
+        </div>
+      )}
+
+      {pending && (
+        <div className="style-assistant">
+          <label className="preset-field-label">
+            Finish the link: approve in the tab that opened, then paste the URL it
+            landed on
+          </label>
+          <input
+            value={pastedUrl}
+            placeholder="https://your-host/api/tiktok/link/callback?code=...&state=..."
+            onChange={(e) => setPastedUrl(e.target.value)}
+          />
+          <div className="row" style={{ justifyContent: "space-between", marginTop: 8 }}>
+            <span className="style-assistant-note">
+              Not needed if this app is reachable at the redirect URI - the link
+              completes on its own.
+            </span>
+            <div className="row">
+              <button className="btn ghost sm" onClick={() => { setPending(null); setPastedUrl(""); }}>
+                Cancel
+              </button>
+              <button
+                className="btn sm primary"
+                disabled={!pastedUrl.trim() || complete.isPending}
+                onClick={() => complete.mutate()}
+              >
+                {complete.isPending ? "Linking..." : "Complete link"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {error && <div className="banner compact">{error}</div>}
+
+      {status.accounts.length === 0 ? (
+        <div className="key-row">
+          <span>No accounts linked yet.</span>
+        </div>
+      ) : (
+        status.accounts.map((account) => (
+          <TikTokAccountRow key={account.id} account={account} onChange={invalidate} />
+        ))
+      )}
+
+      <p className="panel-sub" style={{ marginTop: 12 }}>
+        Until TikTok audits the developer app, every post it makes is forced to
+        private (SELF_ONLY) regardless of the privacy level chosen.
+      </p>
+    </div>
+  );
+}
+
+function TikTokAccountRow({ account, onChange }) {
+  const refresh = useMutation({ mutationFn: () => api.tiktokRefreshAccount(account.id), onSuccess: onChange });
+  const unlink = useMutation({ mutationFn: () => api.tiktokUnlink(account.id), onSuccess: onChange });
+  const groups = account.groups.map((g) => g.name).join(", ");
+
+  return (
+    <div className="key-row">
+      <span>
+        <strong>{account.display_name || account.open_id}</strong>
+        <span className="model-code" style={{ marginLeft: 8 }}>
+          {groups || "no group selected"}
+        </span>
+        {account.needs_relink && (
+          <span className="key-status missing" style={{ marginLeft: 8 }}>
+            <Minus />
+            re-link needed
+          </span>
+        )}
+        {account.last_error && <div className="form-error">{account.last_error}</div>}
+      </span>
+      <span className="row">
+        <button className="btn sm" disabled={refresh.isPending} onClick={() => refresh.mutate()}>
+          <RefreshCw />
+          {refresh.isPending ? "Refreshing..." : "Refresh"}
+        </button>
+        <button className="btn sm danger" disabled={unlink.isPending} onClick={() => unlink.mutate()}>
+          <Trash2 />
+          Unlink
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function PresetSection({ kind }) {
   const qc = useQueryClient();
   const isPlatform = kind === "platform";
@@ -183,6 +337,11 @@ function PresetSection({ kind }) {
   const { data: voices = [] } = useQuery({
     queryKey: ["voices"],
     queryFn: api.listVoices,
+    enabled: !isPlatform,
+  });
+  const { data: tiktok } = useQuery({
+    queryKey: ["tiktok"],
+    queryFn: api.tiktokStatus,
     enabled: !isPlatform,
   });
   const invalidate = () => qc.invalidateQueries({ queryKey: [key] });
@@ -208,6 +367,7 @@ function PresetSection({ kind }) {
           promptField={promptField}
           styleField={styleField}
           voiceOptions={voices}
+          tiktokAccounts={tiktok?.accounts || []}
           onSave={(body) => update(p.id, body).then(invalidate)}
           onDelete={() => remove(p.id).then(invalidate)}
         />
@@ -228,7 +388,17 @@ function PresetSection({ kind }) {
   );
 }
 
-function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNew, onSave, onDelete, onCancel }) {
+function PresetEditor({
+  preset,
+  promptField,
+  styleField,
+  voiceOptions = [],
+  tiktokAccounts = [],
+  isNew,
+  onSave,
+  onDelete,
+  onCancel,
+}) {
   const [name, setName] = useState(preset.name);
   const [prompt, setPrompt] = useState(preset[promptField] || "");
   const [style, setStyle] = useState(styleField ? preset[styleField] || "" : "");
@@ -239,7 +409,18 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
   const [styleGuidance, setStyleGuidance] = useState("");
   const [styleError, setStyleError] = useState("");
   const [isDefault, setIsDefault] = useState(preset.is_default);
+  const [accountId, setAccountId] = useState(preset.tiktok_account_id || "");
   const [saving, setSaving] = useState(false);
+  const qc = useQueryClient();
+  // The account lives behind its own endpoint, so it saves on change instead of
+  // riding along with the preset body (which would clear it from older forms).
+  const selectAccount = useMutation({
+    mutationFn: (id) => api.tiktokSelectGroupAccount(preset.id, id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["tiktok"] });
+      qc.invalidateQueries({ queryKey: ["contentPresets"] });
+    },
+  });
   const selectedVoice = voiceOptions.find((voice) => voice.id === voiceId) || null;
   const filteredVoices = voiceOptions.filter((voice) => {
     const haystack = [voice.label, voice.description, voice.source, ...Object.values(voice.labels || {})]
@@ -382,6 +563,32 @@ function PresetEditor({ preset, promptField, styleField, voiceOptions = [], isNe
             equations, anything) synced to the narration, where they explain
             better than an AI image or video.
           </label>
+          {!isNew && (
+            <>
+              <label className="preset-field-label">TikTok account</label>
+              <select
+                value={accountId}
+                disabled={selectAccount.isPending}
+                onChange={(e) => {
+                  setAccountId(e.target.value);
+                  selectAccount.mutate(e.target.value);
+                }}
+              >
+                <option value="">Not published to TikTok</option>
+                {tiktokAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.display_name || account.open_id}
+                    {account.groups.length ? ` (also: ${account.groups.map((g) => g.name).join(", ")})` : ""}
+                  </option>
+                ))}
+              </select>
+              <div className="style-assistant-note">
+                {tiktokAccounts.length
+                  ? "Pick an account already linked in TikTok publishing below. Saved immediately."
+                  : "No accounts linked yet - link one in TikTok publishing below."}
+              </div>
+            </>
+          )}
         </>
       )}
       <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>

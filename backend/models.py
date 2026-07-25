@@ -217,7 +217,37 @@ class ContentPreset(SQLModel, table=True):
     # emit an animation spec for them. Off by default so narrative/photographic
     # presets (e.g. mythology) never get diagrams sprinkled in.
     enable_animations: bool = False
+    # Which linked TikTok account this group publishes as. Groups pick from the
+    # accounts already in the app, so one login can serve several groups.
+    tiktok_account_id: Optional[str] = Field(default=None, foreign_key="tiktok_accounts.id")
     is_default: bool = False
+
+
+class TikTokAccount(SQLModel, table=True):
+    """One authorized TikTok creator account, owned by the app, not by a group.
+
+    Accounts are linked once and then *selected* by any number of groups, so a
+    second group that posts as the same creator never re-runs the OAuth flow.
+    """
+
+    __tablename__ = "tiktok_accounts"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    # TikTok's stable per-app user identifier — the key we de-duplicate on.
+    open_id: str = Field(index=True)
+    union_id: str = ""
+    display_name: str = ""
+    avatar_url: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
+    # Access tokens last ~24h and refresh tokens ~365 days; both are refreshed
+    # ahead of expiry, and the refresh token is replaced by whatever comes back.
+    access_expires_at: Optional[datetime] = None
+    refresh_expires_at: Optional[datetime] = None
+    scopes: str = ""
+    last_error: str = ""
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class MusicTrack(SQLModel, table=True):

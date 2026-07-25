@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .database import init_db
 from .events import bus
-from .routers import characters, ideas, media, music, presets, projects, voices
+from .routers import characters, ideas, media, music, presets, projects, tiktok, voices
 from .routers import settings as settings_router
 from .seed import seed
 
@@ -35,6 +35,7 @@ app.include_router(ideas.router)
 app.include_router(voices.router)
 app.include_router(music.router)
 app.include_router(media.router)
+app.include_router(tiktok.router)
 
 
 @app.on_event("startup")

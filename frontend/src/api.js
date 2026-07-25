@@ -139,6 +139,31 @@ export const api = {
     return res.json();
   },
 
+  // TikTok
+  tiktokStatus: () => req("/api/tiktok/status"),
+  tiktokLinkStart: (body) =>
+    req("/api/tiktok/link/start", { method: "POST", body: JSON.stringify(body || {}) }),
+  tiktokLinkComplete: (body) =>
+    req("/api/tiktok/link/complete", { method: "POST", body: JSON.stringify(body) }),
+  tiktokUnlink: (id) => req(`/api/tiktok/accounts/${id}`, { method: "DELETE" }),
+  tiktokRefreshAccount: (id) =>
+    req(`/api/tiktok/accounts/${id}/refresh`, { method: "POST" }),
+  tiktokSelectGroupAccount: (groupId, accountId) =>
+    req(`/api/tiktok/groups/${groupId}/account`, {
+      method: "PUT",
+      body: JSON.stringify({ account_id: accountId || null }),
+    }),
+  tiktokPublishTarget: (pid) => req(`/api/projects/${pid}/publish/tiktok`),
+  tiktokPublish: (pid, body) =>
+    req(`/api/projects/${pid}/publish/tiktok`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  tiktokPublishStatus: (pid, publishId) =>
+    req(
+      `/api/projects/${pid}/publish/tiktok/status?publish_id=${encodeURIComponent(publishId)}`
+    ),
+
   // Presets
   listPlatformPresets: () => req("/api/presets/platform"),
   createPlatformPreset: (body) =>

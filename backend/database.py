@@ -35,6 +35,7 @@ _ADDED_COLUMNS = [
     ("scenes", "animation_path", "TEXT DEFAULT NULL"),
     ("scenes", "animation_variants", "JSON DEFAULT '[]'"),
     ("content_presets", "enable_animations", "BOOLEAN DEFAULT 0"),
+    ("content_presets", "tiktok_account_id", "TEXT DEFAULT NULL"),
     ("projects", "failed_stage", "TEXT DEFAULT NULL"),
     ("projects", "cancel_requested", "BOOLEAN DEFAULT 0"),
     ("projects", "canceled_stage", "TEXT DEFAULT NULL"),
