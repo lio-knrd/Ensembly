@@ -16,7 +16,7 @@ from .routers import characters, ideas, media, music, presets, projects, tiktok,
 from .routers import settings as settings_router
 from .seed import seed
 
-app = FastAPI(title="AI Video Pipeline Studio")
+app = FastAPI(title="Ensembly")
 
 # Dev convenience: Vite dev server (5173) talks to this backend directly.
 app.add_middleware(

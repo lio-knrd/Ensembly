@@ -87,6 +87,47 @@ class UploadRangeTests(unittest.TestCase):
         self.assertEqual(original, sent[0][2])
 
 
+class DraftUploadTests(unittest.TestCase):
+    """The audit-free path: hand the video to the creator's inbox."""
+
+    def _fake_post(self, captured):
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {
+                    "data": {"publish_id": "pub-1", "upload_url": "https://upload"},
+                    "error": {"code": "ok"},
+                }
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def post(self, url, headers=None, json=None):
+                captured.append((url, json))
+                return FakeResponse()
+
+        return FakeClient
+
+    def test_draft_init_sends_no_post_info(self):
+        captured = []
+        with mock.patch.object(tiktok.httpx, "Client", lambda *a, **k: self._fake_post(captured)()):
+            result = tiktok.init_draft_upload("token", video_bytes=3 * tiktok.MB)
+
+        url, body = captured[0]
+        self.assertTrue(url.endswith("/post/publish/inbox/video/init/"))
+        # No privacy level or title: the creator sets those in the TikTok app.
+        self.assertNotIn("post_info", body)
+        self.assertEqual(3 * tiktok.MB, body["source_info"]["video_size"])
+        self.assertEqual("pub-1", result["publish_id"])
+        self.assertEqual(1, result["total_chunk_count"])
+
+
 class PkceTests(unittest.TestCase):
     def test_challenge_is_the_hex_sha256_tiktok_expects(self):
         verifier = "a" * 64
@@ -139,7 +180,7 @@ class AccountSharingTests(unittest.TestCase):
         from backend.routers.tiktok import _groups_using, unlink_account
 
         with Session(self.engine) as session:
-            account = TikTokAccount(open_id="open-1", display_name="Mythforge")
+            account = TikTokAccount(open_id="open-1", display_name="Ensembly")
             session.add(account)
             session.commit()
             session.refresh(account)

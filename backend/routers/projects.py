@@ -423,15 +423,20 @@ def publish_to_tiktok(
     metadata = project_metadata(project.folder_path)
     caption = (body.caption or metadata.get("suggested_caption") or project.title).strip()
     try:
-        init = tiktok_service.init_direct_post(
-            token,
-            video_bytes=video.stat().st_size,
-            title=caption,
-            privacy_level=body.privacy_level,
-            disable_comment=body.disable_comment,
-            disable_duet=body.disable_duet,
-            disable_stitch=body.disable_stitch,
-        )
+        if body.mode == "draft":
+            # The caption travels with the creator, not the API: TikTok's draft
+            # flow has them write/confirm it in the app before posting.
+            init = tiktok_service.init_draft_upload(token, video_bytes=video.stat().st_size)
+        else:
+            init = tiktok_service.init_direct_post(
+                token,
+                video_bytes=video.stat().st_size,
+                title=caption,
+                privacy_level=body.privacy_level,
+                disable_comment=body.disable_comment,
+                disable_duet=body.disable_duet,
+                disable_stitch=body.disable_stitch,
+            )
         tiktok_service.upload_video(
             init["upload_url"], video, init["chunk_size"], init["total_chunk_count"]
         )
@@ -440,8 +445,9 @@ def publish_to_tiktok(
     return {
         "publish_id": init["publish_id"],
         "account_id": account.id,
+        "mode": body.mode,
         "caption": caption,
-        "privacy_level": body.privacy_level,
+        "privacy_level": body.privacy_level if body.mode == "direct" else None,
     }
 
 

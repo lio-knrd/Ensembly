@@ -1169,6 +1169,7 @@ function TikTokPublish({ project }) {
   });
   const [caption, setCaption] = useState("");
   const [privacy, setPrivacy] = useState("SELF_ONLY");
+  const [mode, setMode] = useState("draft");
   const [result, setResult] = useState(null);
   const [status, setStatus] = useState(null);
 
@@ -1178,7 +1179,7 @@ function TikTokPublish({ project }) {
 
   const publish = useMutation({
     mutationFn: () =>
-      api.tiktokPublish(project.id, { caption, privacy_level: privacy }),
+      api.tiktokPublish(project.id, { mode, caption, privacy_level: privacy }),
     onSuccess: (data) => {
       setResult(data);
       setStatus(null);
@@ -1217,19 +1218,38 @@ function TikTokPublish({ project }) {
             <span className="model-code">{Math.round(target.video_bytes / 1048576)} MB</span>
           </div>
           <div className="field">
-            <label>Caption</label>
-            <textarea value={caption} onChange={(e) => setCaption(e.target.value)} />
+            <label>Mode</label>
+            <select value={mode} onChange={(e) => setMode(e.target.value)}>
+              <option value="draft">Send to TikTok drafts - you post it in the app</option>
+              <option value="direct">Post directly to the profile - needs an audited app</option>
+            </select>
+            <span className="style-assistant-note">
+              {mode === "draft"
+                ? "Works without TikTok's app audit, and you choose the audience in the app. Max 5 pending drafts per day."
+                : "Until the developer app passes TikTok's audit, direct posts are forced to private."}
+            </span>
           </div>
           <div className="field">
-            <label>Privacy</label>
-            <select value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
-              {target.privacy_levels.map((level) => (
-                <option key={level} value={level}>
-                  {level}
-                </option>
-              ))}
-            </select>
+            <label>Caption</label>
+            <textarea value={caption} onChange={(e) => setCaption(e.target.value)} />
+            {mode === "draft" && (
+              <span className="style-assistant-note">
+                TikTok's draft flow asks for the caption in the app - copy this over there.
+              </span>
+            )}
           </div>
+          {mode === "direct" && (
+            <div className="field">
+              <label>Privacy</label>
+              <select value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
+                {target.privacy_levels.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           {publish.isError && <div className="banner compact">{String(publish.error.message)}</div>}
           {check.isError && <div className="banner compact">{String(check.error.message)}</div>}
           <div className="row">
@@ -1239,7 +1259,11 @@ function TikTokPublish({ project }) {
               onClick={() => publish.mutate()}
             >
               <Upload />
-              {publish.isPending ? "Uploading..." : "Publish"}
+              {publish.isPending
+                ? "Uploading..."
+                : mode === "draft"
+                ? "Send to drafts"
+                : "Publish"}
             </button>
             {result && (
               <button className="btn" disabled={check.isPending} onClick={() => check.mutate()}>

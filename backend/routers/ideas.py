@@ -97,7 +97,7 @@ def convert_idea(idea_id: str, body: IdeaConvert, session: Session = Depends(get
             summary=idea.notes or idea.text,
             coverage_summary="Coverage not documented yet.",
             status="in_progress",
-            source_type="mythforge",
+            source_type="ensembly",
             order_index=_next_order(session, plan.id),
             target_duration_seconds=idea.target_duration_seconds,
             project_id=project.id,
@@ -391,7 +391,7 @@ def convert_item(
     item = _item(session, plan_id, item_id)
     platform, content = _effective_presets(session, plan)
     if item.project_id:
-        raise HTTPException(400, "This work already has a MythForge project")
+        raise HTTPException(400, "This work already has a Ensembly project")
     existing_titles = set(session.exec(select(Project.title)).all())
     title = item.title[:120]
     if title in existing_titles:
@@ -432,7 +432,7 @@ def convert_item(
     session.add(project)
     session.flush()
     item.project_id = project.id
-    item.source_type = "mythforge"
+    item.source_type = "ensembly"
     item.status = "in_progress"
     item.updated_at = _now()
     session.add(item)

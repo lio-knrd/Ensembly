@@ -1,1 +1,1 @@
-"""AI Video Pipeline Studio — backend package."""
+"""Ensembly — backend package."""

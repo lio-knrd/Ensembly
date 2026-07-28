@@ -72,6 +72,23 @@ def init_db() -> None:
 
     SQLModel.metadata.create_all(engine)
     _run_migrations()
+    _rename_legacy_values()
+
+
+def _rename_legacy_values() -> None:
+    """Carry data written under the app's former name (Mythforge) forward.
+
+    ``source_type`` marks which editorial items were produced in this app, and
+    the value is shown in the UI, so old rows would otherwise read "mythforge"
+    forever. The UPDATE is idempotent, so it can run on every start.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE editorial_items SET source_type = 'ensembly' "
+                "WHERE source_type = 'mythforge'"
+            )
+        )
 
 
 def _run_migrations() -> None:

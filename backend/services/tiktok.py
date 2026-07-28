@@ -9,8 +9,10 @@ Publishing flow (Direct Post):
   4. ``status/fetch`` — poll ``publish_id`` until the post is published/failed.
 
 Two limits are TikTok's, not ours, and shape the UI:
-  * Until the developer app passes TikTok's audit, everything it posts is forced
-    to private (SELF_ONLY) no matter which privacy level was requested.
+  * Until the developer app passes TikTok's audit, everything Direct Post
+    publishes is forced to private (SELF_ONLY) no matter which privacy level was
+    requested. ``init_draft_upload`` is the way around that: it hands the video
+    to the creator's TikTok inbox, and they post it publicly themselves.
   * The redirect URI must be an absolute https URL registered on the app, so a
     local install links accounts through a tunnel or the paste-URL fallback.
 """
@@ -253,6 +255,36 @@ def init_direct_post(
         )
     payload = _json(response)
     _raise_for_error(response, payload, "TikTok rejected the post")
+    data = payload.get("data", {}) or {}
+    if not data.get("publish_id") or not data.get("upload_url"):
+        raise TikTokError("TikTok did not return an upload target.")
+    return {**data, "chunk_size": chunk_size, "total_chunk_count": total_chunks}
+
+
+def init_draft_upload(access_token: str, *, video_bytes: int) -> dict:
+    """Send the video to the creator's TikTok inbox as a draft.
+
+    This is the path that works *without* TikTok's audit: nothing is posted by
+    the API, so nothing is forced private. The creator opens the TikTok inbox
+    notification and publishes it themselves, at whatever visibility they want.
+    TikTok allows at most 5 pending drafts per creator per 24 hours.
+    """
+    chunk_size, total_chunks = chunk_plan(video_bytes)
+    with httpx.Client(timeout=TIMEOUT) as client:
+        response = client.post(
+            f"{API_BASE}/post/publish/inbox/video/init/",
+            headers=_headers(access_token),
+            json={
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": video_bytes,
+                    "chunk_size": chunk_size,
+                    "total_chunk_count": total_chunks,
+                }
+            },
+        )
+    payload = _json(response)
+    _raise_for_error(response, payload, "TikTok rejected the draft upload")
     data = payload.get("data", {}) or {}
     if not data.get("publish_id") or not data.get("upload_url"):
         raise TikTokError("TikTok did not return an upload target.")

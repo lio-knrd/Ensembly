@@ -27,7 +27,7 @@ export default function App() {
             <Flame size={17} strokeWidth={2.4} />
           </span>
           <span className="brand-name">
-            Mythforge
+            Ensembly
             <small>AI video pipeline</small>
           </span>
         </div>

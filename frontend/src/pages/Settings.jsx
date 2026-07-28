@@ -275,8 +275,9 @@ function TikTokPanel() {
       )}
 
       <p className="panel-sub" style={{ marginTop: 12 }}>
-        Until TikTok audits the developer app, every post it makes is forced to
-        private (SELF_ONLY) regardless of the privacy level chosen.
+        Until TikTok audits the developer app, direct posts are forced to private
+        (SELF_ONLY). Sending a video to TikTok drafts instead needs no audit - you
+        publish it from the TikTok app at any audience you like.
       </p>
     </div>
   );

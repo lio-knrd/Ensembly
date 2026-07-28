@@ -162,6 +162,10 @@ class TikTokAccountSelect(BaseModel):
 
 
 class TikTokPublishIn(BaseModel):
+    # "draft" sends the video to the TikTok inbox for the creator to publish
+    # (works without TikTok's audit); "direct" posts straight to the profile
+    # (audited apps only, otherwise forced to private).
+    mode: Literal["draft", "direct"] = "draft"
     privacy_level: str = "SELF_ONLY"
     caption: Optional[str] = None
     disable_comment: bool = False
