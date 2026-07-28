@@ -45,7 +45,7 @@ def _run_dev() -> None:
     # Start the Vite dev server (hot reload for the frontend).
     vite = subprocess.Popen("npm run dev", cwd=FRONTEND_DIR, shell=True)
     url = "http://localhost:5173"
-    print(f"\n  Mythforge (dev) — {url}\n")
+    print(f"\n  Ensembly (dev) — {url}\n")
     _open_browser(url, delay=2.5)
     try:
         # reload_dirs keeps the watcher on the backend; Vite handles the frontend.
@@ -62,7 +62,7 @@ def _run_dev() -> None:
 
 def _run_prod() -> None:
     url = f"http://localhost:{settings.app_port}"
-    print(f"\n  Mythforge — {url}\n")
+    print(f"\n  Ensembly — {url}\n")
     _open_browser(url)
     uvicorn.run(
         "backend.main:app",
@@ -73,7 +73,7 @@ def _run_prod() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Mythforge.")
+    parser = argparse.ArgumentParser(description="Run Ensembly.")
     parser.add_argument(
         "--dev",
         action="store_true",

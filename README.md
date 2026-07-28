@@ -1,4 +1,4 @@
-# AI Video Pipeline Studio — Project Spec
+# Ensembly — Project Spec
 
 ## 1. What this is
 

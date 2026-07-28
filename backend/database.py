@@ -35,6 +35,7 @@ _ADDED_COLUMNS = [
     ("scenes", "animation_path", "TEXT DEFAULT NULL"),
     ("scenes", "animation_variants", "JSON DEFAULT '[]'"),
     ("content_presets", "enable_animations", "BOOLEAN DEFAULT 0"),
+    ("content_presets", "tiktok_account_id", "TEXT DEFAULT NULL"),
     ("projects", "failed_stage", "TEXT DEFAULT NULL"),
     ("projects", "cancel_requested", "BOOLEAN DEFAULT 0"),
     ("projects", "canceled_stage", "TEXT DEFAULT NULL"),
@@ -71,6 +72,23 @@ def init_db() -> None:
 
     SQLModel.metadata.create_all(engine)
     _run_migrations()
+    _rename_legacy_values()
+
+
+def _rename_legacy_values() -> None:
+    """Carry data written under the app's former name (Mythforge) forward.
+
+    ``source_type`` marks which editorial items were produced in this app, and
+    the value is shown in the UI, so old rows would otherwise read "mythforge"
+    forever. The UPDATE is idempotent, so it can run on every start.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE editorial_items SET source_type = 'ensembly' "
+                "WHERE source_type = 'mythforge'"
+            )
+        )
 
 
 def _run_migrations() -> None:

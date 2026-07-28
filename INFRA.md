@@ -1,6 +1,6 @@
 # Infrastructure & Deployment Notes
 
-Living document for how Mythforge is served today and the decisions to make
+Living document for how Ensembly is served today and the decisions to make
 when we host it. Not a task board for features — this is about runtime, serving,
 and deployment. Update it as decisions get made.
 

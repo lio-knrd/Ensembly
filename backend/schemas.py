@@ -141,6 +141,38 @@ class ContentPresetIn(BaseModel):
     is_default: bool = False
 
 
+# --- TikTok ---
+# The group's account is deliberately absent from ContentPresetIn: preset saves
+# send a whole body, so a form that doesn't know about TikTok would clear the
+# selection. It is set through /api/tiktok/groups/{id}/account instead.
+class TikTokLinkStart(BaseModel):
+    # When set, the newly linked account is attached to this group right away.
+    content_preset_id: Optional[str] = None
+
+
+class TikTokLinkComplete(BaseModel):
+    # Either paste the whole URL TikTok redirected to, or pass code + state.
+    redirected_url: Optional[str] = None
+    code: Optional[str] = None
+    state: Optional[str] = None
+
+
+class TikTokAccountSelect(BaseModel):
+    account_id: Optional[str] = None
+
+
+class TikTokPublishIn(BaseModel):
+    # "draft" sends the video to the TikTok inbox for the creator to publish
+    # (works without TikTok's audit); "direct" posts straight to the profile
+    # (audited apps only, otherwise forced to private).
+    mode: Literal["draft", "direct"] = "draft"
+    privacy_level: str = "SELF_ONLY"
+    caption: Optional[str] = None
+    disable_comment: bool = False
+    disable_duet: bool = False
+    disable_stitch: bool = False
+
+
 class StyleSuggestionIn(BaseModel):
     content_prompt: str = ""
     current_style_prompt: str = ""

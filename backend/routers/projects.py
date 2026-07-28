@@ -29,6 +29,7 @@ from ..models import (
     Scene,
     SceneType,
     Stage,
+    TikTokAccount,
 )
 from ..schemas import (
     CastSheetGenerate,
@@ -39,12 +40,15 @@ from ..schemas import (
     ProjectSubtitlesUpdate,
     SceneAssetSelect,
     SceneUpdate,
+    TikTokPublishIn,
     TitleCardGenerate,
     TitleCardSelect,
     TitleCardUpdate,
 )
 from ..events import bus
+from ..services import tiktok as tiktok_service
 from ..services.music_library import apply_default as apply_default_music
+from .tiktok import ensure_access_token as ensure_tiktok_token
 from ..storage import slugify
 from .common import (
     default_content_preset,
@@ -333,6 +337,133 @@ def generate_cast_sheet(project_id: str, body: CastSheetGenerate, session: Sessi
         body.state,
     )
     return {"ok": True}
+
+
+# --- TikTok publishing (posts as the group's linked account) ---
+def _final_video_path(project: Project) -> Path | None:
+    if not project.folder_path:
+        return None
+    path = (
+        Path(settings.projects_dir.parent.parent)
+        / project.folder_path
+        / "final"
+        / f"{slugify(project.title)}.mp4"
+    )
+    return path if path.is_file() else None
+
+
+def _publish_account(session: Session, project: Project) -> TikTokAccount:
+    """The account this project posts as — its group's, and only its group's."""
+    preset = (
+        session.get(ContentPreset, project.content_preset_id)
+        if project.content_preset_id
+        else None
+    )
+    if not preset:
+        raise HTTPException(400, "This project has no group, so there is no TikTok account.")
+    if not preset.tiktok_account_id:
+        raise HTTPException(
+            400, f"The group \"{preset.name}\" has no TikTok account selected yet."
+        )
+    account = session.get(TikTokAccount, preset.tiktok_account_id)
+    if not account:
+        raise HTTPException(400, "The group's TikTok account is no longer linked.")
+    return account
+
+
+@router.get("/{project_id}/publish/tiktok")
+def tiktok_publish_target(project_id: str, session: Session = Depends(get_session)):
+    """What this project would post as, so the UI can show it before publishing."""
+    project = _require(session, project_id)
+    preset = (
+        session.get(ContentPreset, project.content_preset_id)
+        if project.content_preset_id
+        else None
+    )
+    account = (
+        session.get(TikTokAccount, preset.tiktok_account_id)
+        if preset and preset.tiktok_account_id
+        else None
+    )
+    metadata = project_metadata(project.folder_path)
+    video = _final_video_path(project)
+    return {
+        "configured": tiktok_service.is_configured(),
+        "group": {"id": preset.id, "name": preset.name} if preset else None,
+        "account": (
+            {
+                "id": account.id,
+                "display_name": account.display_name,
+                "open_id": account.open_id,
+                "avatar_url": account.avatar_url,
+            }
+            if account
+            else None
+        ),
+        "video_ready": bool(video),
+        "video_bytes": video.stat().st_size if video else 0,
+        "suggested_caption": metadata.get("suggested_caption", "") or project.title,
+        "privacy_levels": list(tiktok_service.PRIVACY_LEVELS),
+    }
+
+
+@router.post("/{project_id}/publish/tiktok")
+def publish_to_tiktok(
+    project_id: str,
+    body: TikTokPublishIn,
+    session: Session = Depends(get_session),
+):
+    """Direct-post the finished render to the group's TikTok account."""
+    project = _require(session, project_id)
+    video = _final_video_path(project)
+    if not video:
+        raise HTTPException(400, "This project has no finished video to publish yet.")
+    account = _publish_account(session, project)
+    token = ensure_tiktok_token(session, account)
+    metadata = project_metadata(project.folder_path)
+    caption = (body.caption or metadata.get("suggested_caption") or project.title).strip()
+    try:
+        if body.mode == "draft":
+            # The caption travels with the creator, not the API: TikTok's draft
+            # flow has them write/confirm it in the app before posting.
+            init = tiktok_service.init_draft_upload(token, video_bytes=video.stat().st_size)
+        else:
+            init = tiktok_service.init_direct_post(
+                token,
+                video_bytes=video.stat().st_size,
+                title=caption,
+                privacy_level=body.privacy_level,
+                disable_comment=body.disable_comment,
+                disable_duet=body.disable_duet,
+                disable_stitch=body.disable_stitch,
+            )
+        tiktok_service.upload_video(
+            init["upload_url"], video, init["chunk_size"], init["total_chunk_count"]
+        )
+    except tiktok_service.TikTokError as exc:
+        raise HTTPException(502, str(exc))
+    return {
+        "publish_id": init["publish_id"],
+        "account_id": account.id,
+        "mode": body.mode,
+        "caption": caption,
+        "privacy_level": body.privacy_level if body.mode == "direct" else None,
+    }
+
+
+@router.get("/{project_id}/publish/tiktok/status")
+def tiktok_publish_status(
+    project_id: str,
+    publish_id: str,
+    session: Session = Depends(get_session),
+):
+    project = _require(session, project_id)
+    account = _publish_account(session, project)
+    token = ensure_tiktok_token(session, account)
+    try:
+        return tiktok_service.publish_status(token, publish_id)
+    except tiktok_service.TikTokError as exc:
+        raise HTTPException(502, str(exc))
 
 
 @router.post("/{project_id}/cast/generate-missing")
@@ -661,12 +792,5 @@ def _title_card_options(project: Project) -> list[dict]:
 
 
 def _final_video_version(project: Project) -> int | None:
-    if not project.folder_path:
-        return None
-    path = (
-        Path(settings.projects_dir.parent.parent)
-        / project.folder_path
-        / "final"
-        / f"{slugify(project.title)}.mp4"
-    )
-    return int(path.stat().st_mtime) if path.is_file() else None
+    path = _final_video_path(project)
+    return int(path.stat().st_mtime) if path else None

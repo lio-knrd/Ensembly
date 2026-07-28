@@ -142,7 +142,7 @@ class KreaDirectImageGenerator(ImageGenerator):
                     f"{_KREA_API_BASE}/assets",
                     headers={"Authorization": f"Bearer {settings.krea_api_key}"},
                     files={"file": (path.name, file_handle, mime)},
-                    data={"description": f"Mythforge reference: {path.name}"},
+                    data={"description": f"Ensembly reference: {path.name}"},
                     timeout=120,
                 )
             if response.status_code >= 400:
