@@ -12,6 +12,7 @@ from .config import settings
 # existing tables). Each entry: table, column, SQL type + default.
 _ADDED_COLUMNS = [
     ("content_presets", "image_style_prompt", "TEXT DEFAULT ''"),
+    ("content_presets", "animation_style_prompt", "TEXT DEFAULT ''"),
     ("content_presets", "voice_id", "TEXT DEFAULT ''"),
     ("characters", "reference_prompt", "TEXT DEFAULT ''"),
     ("characters", "reference_style_prompt", "TEXT DEFAULT ''"),

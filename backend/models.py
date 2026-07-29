@@ -212,6 +212,12 @@ class ContentPreset(SQLModel, table=True):
     # (character reference sheets + scene images). NOT sent to the script LLM,
     # so scene image_prompts stay clean and the look stays consistent.
     image_style_prompt: str = ""
+    # The same idea for animation scenes: a house style handed to the Manim
+    # authoring call so diagrams carry the group's palette and layout instead of
+    # the generic catalog defaults. Separate from image_style_prompt because the
+    # two describe different media (a rendered photo vs. drawn geometry) and
+    # neither reaches the script LLM.
+    animation_style_prompt: str = ""
     voice_id: str = ""
     # When on, the script LLM may mark scenes as deterministic animations and
     # emit an animation spec for them. Off by default so narrative/photographic

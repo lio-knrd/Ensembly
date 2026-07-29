@@ -59,6 +59,15 @@ DEFAULT_MATH_CONTENT = ContentPreset(
         "Clean, modern explanatory visuals on a dark background: crisp shapes, high "
         "contrast, minimal clutter, a restrained accent palette. Vertical 9:16."
     ),
+    # The same look, expressed for drawn diagrams rather than generated images,
+    # so animation scenes match the stills instead of using the catalog defaults.
+    animation_style_prompt=(
+        "Restrained and consistent: WHITE for structure (axes, gridlines, labels) "
+        "and one accent color per scene for the quantity being explained. Numbers "
+        "are large and sit in the upper third so the platform UI never covers "
+        "them; labels are small and sit directly beneath what they name. No "
+        "gradients, no glow, no decorative motion."
+    ),
     enable_animations=True,
     voice_id=settings.elevenlabs_voice_id,
 )

@@ -233,6 +233,14 @@ def _content_style(session: Session, project: Project) -> str:
     return (preset.image_style_prompt if preset else "") or ""
 
 
+def _content_animation_style(session: Session, project: Project) -> str:
+    """The animation house style from the project's content preset (may be empty)."""
+    if not project.content_preset_id:
+        return ""
+    preset = session.get(ContentPreset, project.content_preset_id)
+    return (preset.animation_style_prompt if preset else "") or ""
+
+
 def _content_voice_id(session: Session, project: Project) -> str | None:
     """The TTS voice from the project's content preset, falling back to config."""
     if not project.content_preset_id:
@@ -1638,7 +1646,9 @@ def _render_scene_animation(session, project: Project, scene: Scene, folder: Pat
         # No code yet (the normal path now): write it against the real narration
         # and length. Any existing code (a user edit / older project) is reused.
         _set_msg(session, project, f"Writing animation for scene {scene.order_index + 1}…")
-        authored = author_manim_code(scene.narration_text, duration, latex)
+        authored = author_manim_code(
+            scene.narration_text, duration, latex, _content_animation_style(session, project)
+        )
         spec = normalize_spec({"code": authored, "title": ""}) if authored else None
         if spec:
             _persist_animation_code(session, scene, spec, spec["code"])

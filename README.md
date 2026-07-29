@@ -104,11 +104,17 @@ length, hook/ending conventions, required metadata. Ships with "TikTok".
 
 **Layer 3 — Content preset (editable, in DB).** Subject matter and tone. Ships with
 "Greek Mythology" and "Math & Science (animated)". A content preset also carries
-three things beyond the prompt:
+four things beyond the prompt:
 - `image_style_prompt` — a visual style applied to **image generation only**
   (character sheets + scene images), deliberately kept out of the script prompt so
   scene prompts stay style-neutral and the look stays consistent. It can be
   AI-drafted from the content prompt.
+- `animation_style_prompt` — the same idea for **animation scenes only**: a house
+  style (palette, type sizes, layout) handed to the Manim authoring call so
+  diagrams carry the group's look instead of the catalog's generic defaults. Also
+  kept out of the script prompt. Shown in the preset editor only when
+  `enable_animations` is on, and empty by default — an empty value leaves the
+  authoring prompt byte-identical to a build without this field.
 - `voice_id` — the ElevenLabs voice for this group.
 - `enable_animations` — opt-in; when on, the script LLM may mark scenes as
   deterministic animations (off by default so narrative presets never get diagrams).
@@ -254,7 +260,8 @@ to the scene's audio, optionally animating toward the next scene's still as an e
 frame. Queue state is persisted so a restart resumes rather than re-submits.
 
 **Animations** — only for `animation` scenes, and only when the content preset opts
-in. After audio exists, the LLM authors Manim code from that scene's narration; cue
+in. After audio exists, the LLM authors Manim code from that scene's narration and
+the group's `animation_style_prompt`; cue
 phrases in the code are matched against the real word timings
 ([`backend/animation/narration.py`](backend/animation/narration.py)) so the diagram
 lands on the words. The code is rendered in an isolated subprocess with a repair

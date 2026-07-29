@@ -529,6 +529,7 @@ def author_manim_code(
     narration: str,
     duration: float,
     latex_available: bool,
+    style_prompt: str = "",
 ) -> str | None:
     """Author Manim construct-body code for one animation scene, AFTER its audio.
 
@@ -538,8 +539,24 @@ def author_manim_code(
     the injected WORDS at render time. Returns construct-body code (no fences), or
     None if no LLM is available. The pipeline then renders it with the same
     bounded auto-repair loop used for user-edited code.
+
+    ``style_prompt`` is the content preset's ``animation_style_prompt`` — the
+    group's house style for diagrams (palette, type sizes, layout). It is placed
+    AFTER the catalog so a group can tighten the catalog's defaults (which offer
+    a whole spectrum of colors) down to its own, but never override the hard
+    constraints above it. Empty for groups that have not set one, in which case
+    the prompt is byte-identical to before.
     """
     from ..animation.catalog import catalog_for_prompt
+
+    style_block = ""
+    if style_prompt.strip():
+        style_block = (
+            "\nHouse style for this channel — follow it exactly, and prefer it over "
+            "any conflicting stylistic suggestion in the rules above (it does not "
+            "override the canvas, sync, or safety constraints):\n"
+            f"{style_prompt.strip()}\n"
+        )
 
     instruction = f"""Write Manim Community code — the BODY of construct(self) — for a short \
 vertical (9:16) animation that visualizes the narration below and stays in sync \
@@ -548,7 +565,7 @@ no def line, no markdown fences.
 
 Authoring rules you must follow:
 {catalog_for_prompt(latex_available)}
-
+{style_block}
 Scene narration (spoken over this animation — copy exact phrases into self.cue): {narration}
 Target duration: {duration:.1f} seconds (pace the animation to fill it).
 

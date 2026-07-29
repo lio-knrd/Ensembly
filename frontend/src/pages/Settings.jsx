@@ -403,6 +403,9 @@ function PresetEditor({
   const [name, setName] = useState(preset.name);
   const [prompt, setPrompt] = useState(preset[promptField] || "");
   const [style, setStyle] = useState(styleField ? preset[styleField] || "" : "");
+  const [animStyle, setAnimStyle] = useState(
+    styleField ? preset.animation_style_prompt || "" : ""
+  );
   const [voiceId, setVoiceId] = useState(styleField ? preset.voice_id || "" : "");
   const [enableAnimations, setEnableAnimations] = useState(!!preset.enable_animations);
   const [voiceSearch, setVoiceSearch] = useState("");
@@ -439,6 +442,7 @@ function PresetEditor({
     isDefault !== preset.is_default ||
     (styleField &&
       (style !== (preset[styleField] || "") ||
+        animStyle !== (preset.animation_style_prompt || "") ||
         voiceId !== (preset.voice_id || "") ||
         enableAnimations !== !!preset.enable_animations));
 
@@ -446,6 +450,7 @@ function PresetEditor({
     setSaving(true);
     const body = { name, [promptField]: prompt, is_default: isDefault };
     if (styleField) body[styleField] = style;
+    if (styleField) body.animation_style_prompt = animStyle;
     if (styleField) body.voice_id = voiceId;
     if (styleField) body.enable_animations = enableAnimations;
     Promise.resolve(onSave(body)).finally(() => setSaving(false));
@@ -564,6 +569,18 @@ function PresetEditor({
             equations, anything) synced to the narration, where they explain
             better than an AI image or video.
           </label>
+          {enableAnimations && (
+            <>
+              <label className="preset-field-label">
+                Animation style (applied to animation scenes only, not the script or images)
+              </label>
+              <textarea
+                value={animStyle}
+                onChange={(e) => setAnimStyle(e.target.value)}
+                placeholder="e.g. Two accent colors on the dark background, large numbers in the upper third, small labels beneath what they name, no gradients or glow..."
+              />
+            </>
+          )}
           {!isNew && (
             <>
               <label className="preset-field-label">TikTok account</label>
