@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus } from "lucide-react";
+import { ListFilter, Plus } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, mediaUrl } from "../api.js";
 import { COLUMNS, columnForStage } from "../stages.js";
@@ -8,15 +8,56 @@ import StatusPill from "../components/StatusPill.jsx";
 import Modal from "../components/Modal.jsx";
 import Loading from "../components/Loading.jsx";
 
+const UNGROUPED = "none";
+// Hidden presets are stored rather than visible ones, so a preset created
+// later shows up on the board instead of silently missing from the filter.
+const HIDDEN_KEY = "board.hidden-content-presets";
+
+function readHidden() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeHidden(hidden) {
+  try {
+    localStorage.setItem(HIDDEN_KEY, JSON.stringify([...hidden]));
+  } catch {
+    /* ignore */
+  }
+}
+
+const presetKey = (project) => project.content_preset_id || UNGROUPED;
+
 export default function Board() {
   const [showNew, setShowNew] = useState(false);
+  const [hidden, setHiddenState] = useState(readHidden);
   const { data: projects = [], isLoading } = useQuery({
     queryKey: ["projects"],
     queryFn: api.listProjects,
   });
+  const { data: presets = [] } = useQuery({
+    queryKey: ["contentPresets"],
+    queryFn: api.listContentPresets,
+  });
+
+  const setHidden = (next) => {
+    writeHidden(next);
+    setHiddenState(next);
+  };
+
+  const countFor = (id) => projects.filter((p) => presetKey(p) === id).length;
+  const options = [
+    ...presets.map((p) => ({ id: p.id, name: p.name })),
+    ...(countFor(UNGROUPED) ? [{ id: UNGROUPED, name: "No preset" }] : []),
+  ];
+  const shown = projects.filter((p) => !hidden.has(presetKey(p)));
 
   const byColumn = Object.fromEntries(COLUMNS.map((c) => [c.key, []]));
-  for (const p of projects) byColumn[columnForStage(p.stage)].push(p);
+  for (const p of shown) byColumn[columnForStage(p.stage)].push(p);
 
   return (
     <>
@@ -25,10 +66,18 @@ export default function Board() {
           <h1>Board</h1>
           <p>Every project, across the pipeline.</p>
         </div>
-        <button className="btn primary" onClick={() => setShowNew(true)}>
-          <Plus />
-          New project
-        </button>
+        <div className="head-actions">
+          <PresetFilter
+            options={options}
+            hidden={hidden}
+            countFor={countFor}
+            onChange={setHidden}
+          />
+          <button className="btn primary" onClick={() => setShowNew(true)}>
+            <Plus />
+            New project
+          </button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -36,6 +85,13 @@ export default function Board() {
       ) : projects.length === 0 ? (
         <div className="empty">
           No projects yet. Create one to start the pipeline.
+        </div>
+      ) : shown.length === 0 ? (
+        <div className="empty stacked">
+          <span>No projects in the selected content presets.</span>
+          <button className="btn sm" onClick={() => setHidden(new Set())}>
+            Show all presets
+          </button>
         </div>
       ) : (
         <div className="board">
@@ -57,6 +113,89 @@ export default function Board() {
 
       {showNew && <NewProjectModal onClose={() => setShowNew(false)} />}
     </>
+  );
+}
+
+function PresetFilter({ options, hidden, countFor, onChange }) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event) => {
+      if (!wrap.current?.contains(event.target)) setOpen(false);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (options.length < 2) return null;
+
+  const visibleCount = options.filter((o) => !hidden.has(o.id)).length;
+  const filtering = visibleCount !== options.length;
+  const toggle = (id) => {
+    const next = new Set(hidden);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next);
+  };
+
+  return (
+    <div className="preset-filter" ref={wrap}>
+      <button
+        className={filtering ? "btn active" : "btn"}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <ListFilter />
+        Presets
+        {filtering && (
+          <span className="preset-filter-count">
+            {visibleCount}/{options.length}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="preset-filter-panel">
+          <div className="preset-filter-head">
+            <span>Content presets</span>
+            <div className="preset-filter-bulk">
+              <button
+                className="btn ghost sm"
+                disabled={!filtering}
+                onClick={() => onChange(new Set())}
+              >
+                All
+              </button>
+              <button
+                className="btn ghost sm"
+                disabled={visibleCount === 0}
+                onClick={() => onChange(new Set(options.map((o) => o.id)))}
+              >
+                None
+              </button>
+            </div>
+          </div>
+          {options.map((option) => (
+            <label className="preset-filter-option" key={option.id}>
+              <input
+                type="checkbox"
+                checked={!hidden.has(option.id)}
+                onChange={() => toggle(option.id)}
+              />
+              <span className="preset-filter-name">{option.name}</span>
+              <span className="column-count">{countFor(option.id)}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
