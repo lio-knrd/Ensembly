@@ -226,6 +226,9 @@ class ContentPreset(SQLModel, table=True):
     # Which linked TikTok account this group publishes as. Groups pick from the
     # accounts already in the app, so one login can serve several groups.
     tiktok_account_id: Optional[str] = Field(default=None, foreign_key="tiktok_accounts.id")
+    # The same, per destination: a group can publish to TikTok, to YouTube, to
+    # both, or to neither, so the two selections are independent.
+    youtube_account_id: Optional[str] = Field(default=None, foreign_key="youtube_accounts.id")
     is_default: bool = False
 
 
@@ -251,6 +254,38 @@ class TikTokAccount(SQLModel, table=True):
     access_expires_at: Optional[datetime] = None
     refresh_expires_at: Optional[datetime] = None
     scopes: str = ""
+    last_error: str = ""
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class YouTubeAccount(SQLModel, table=True):
+    """One authorized YouTube channel, owned by the app, not by a group.
+
+    Mirrors ``TikTokAccount``: linked once, then selected by any number of
+    groups. The differences are Google's, not ours — a refresh token has no
+    advertised lifetime (so ``refresh_expires_at`` stays empty and a dead token
+    only shows up as an ``invalid_grant`` on use), and a refresh response does
+    not normally return a replacement refresh token.
+    """
+
+    __tablename__ = "youtube_accounts"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    # The channel id (UC...) — stable per channel, so it is what we de-duplicate
+    # on. A Google account with several channels links each one separately.
+    channel_id: str = Field(index=True)
+    title: str = ""
+    handle: str = ""
+    avatar_url: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
+    access_expires_at: Optional[datetime] = None
+    refresh_expires_at: Optional[datetime] = None
+    scopes: str = ""
+    # Set when Google rejects the refresh token, which is the one state the
+    # creator has to fix by linking the channel again.
+    needs_relink: bool = False
     last_error: str = ""
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

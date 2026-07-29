@@ -5,7 +5,8 @@ style) through a semi-automated AI pipeline. The user reviews and approves at fo
 checkpoints (script, cast, storyboard/images, video clips); everything else runs
 automatically. The app is a **production dashboard**, not just a script — it shows
 project status on a kanban board, storyboards, a grouped character library, an
-editorial plan for an ordered body of work, and one-click publishing to TikTok.
+editorial plan for an ordered body of work, and one-click publishing to TikTok and
+YouTube.
 
 The pipeline is **topic-agnostic**. It ships with defaults for Greek mythology and
 a second, animation-enabled preset for math/science, but the prompt layers driving
@@ -14,6 +15,7 @@ topic without code changes.
 
 - **New here?** [`GETTING_STARTED.md`](GETTING_STARTED.md) — install, keys, first run.
 - **Serving/deployment:** [`INFRA.md`](INFRA.md) — how it runs today and the hosting plan.
+- **Publishing:** [`YOUTUBE_SETUP.md`](YOUTUBE_SETUP.md) and [`TIKTOK_SETUP.md`](TIKTOK_SETUP.md) — OAuth clients, keys, limits.
 - This file is the reference for *what the system is and how it is put together*.
 
 What stays fixed regardless of topic:
@@ -34,8 +36,9 @@ What stays fixed regardless of topic:
   config; the only user-facing model choice is the image model (two options).
 
 Note: "no auto-posting" was an original non-goal and **no longer holds** — the app
-publishes to TikTok via the official Content Posting API (section 6). Rendered
-files still land on disk and can always be uploaded by hand instead.
+publishes to TikTok via the official Content Posting API and to YouTube via the
+Data API v3 (section 6). Rendered files still land on disk and can always be
+uploaded by hand instead.
 
 ## 2. Tech stack
 
@@ -73,6 +76,7 @@ All secrets live in a single `.env` at the project root (never committed; see
 | `KREA_API_KEY`, `KREA_ASSET_CACHE_FILE` | Direct Krea image generation (used when the Krea model is active) |
 | `JAMENDO_CLIENT_ID` | Royalty-free music search |
 | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REDIRECT_URI`, `TIKTOK_USE_PKCE` | TikTok Login Kit + Content Posting |
+| `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REDIRECT_URI` | YouTube Data API v3 upload (see [`YOUTUBE_SETUP.md`](YOUTUBE_SETUP.md)) |
 | `APP_PORT`, `PROJECTS_DIR`, `CHARACTERS_DIR`, `DATABASE_URL` | App config |
 | `ALLOW_OFFLINE_FALLBACK` | Placeholder generation when a key is missing (default `true`) |
 | `ANIMATION_ENGINE`, `ELEVENLABS_MAX_CHARS` | Animation engine (`manim`/`offline`), TTS request chunk size |
@@ -119,9 +123,9 @@ four things beyond the prompt:
 - `enable_animations` — opt-in; when on, the script LLM may mark scenes as
   deterministic animations (off by default so narrative presets never get diagrams).
 
-A content preset doubles as a **group**: characters and the TikTok account belong to
-one, so "Zeus" in the mythology group and a "Zeus" in another group are separate
-library entries and never cross-match.
+A content preset doubles as a **group**: characters and the publishing accounts
+(TikTok, YouTube) belong to one, so "Zeus" in the mythology group and a "Zeus" in
+another group are separate library entries and never cross-match.
 
 Final prompt = core system prompt + platform preset + content preset
 (+ animation guidance if enabled) + the project's idea and target duration.
@@ -171,11 +175,11 @@ bindings) holding an ordered list of items. An item can be planned, external,
 completed, or AI-suggested, may be grouped into multi-part series
 (`part_group_id`/`part_number`), and converts into a project in one call.
 
-### `music_tracks`, `tiktok_accounts`
+### `music_tracks`, `tiktok_accounts`, `youtube_accounts`
 A shared soundtrack library (bundled local track + Jamendo results, cached on disk)
-and authorized TikTok creator accounts (tokens, expiries, scopes) owned by the app
-and *selected* by groups, so a second group posting as the same creator never
-re-runs OAuth.
+and the authorized publishing accounts — TikTok creators and YouTube channels
+(tokens, expiries, scopes) — owned by the app and *selected* by groups, so a second
+group posting as the same creator never re-runs OAuth.
 
 ## 6. Feature map
 
@@ -203,12 +207,24 @@ works with rationale, part grouping, and conversion into projects.
 present, masked; whether FFmpeg is on PATH), platform/content preset editing
 including image style and voice, and TikTok account linking.
 
-**Publishing** — TikTok Login Kit OAuth links creator accounts once; each group
-selects one. A finished project can be sent as a **Direct Post** or as a **draft to
-the creator's inbox**. Note two TikTok-imposed limits reflected in the UI: until the
-developer app passes TikTok's audit every Direct Post is forced private, and the
-redirect URI must be an absolute https URL (a local install uses a tunnel or the
+**Publishing** — two destinations, selected independently per group.
+
+*TikTok*: Login Kit OAuth links creator accounts once; each group selects one. A
+finished project can be sent as a **Direct Post** or as a **draft to the creator's
+inbox**. Two TikTok-imposed limits are reflected in the UI: until the developer app
+passes TikTok's audit every Direct Post is forced private, and the redirect URI must
+be an absolute https URL (a local install uses a tunnel or the
 paste-the-redirected-URL fallback).
+
+*YouTube*: Google OAuth links channels once; each group selects one. A finished
+project is uploaded with `videos.insert` (resumable, resumes after a dropped
+connection) with the title, description, and tags pre-filled from the project
+metadata. A 9:16 render under 3 minutes is classified as a Short by YouTube itself
+— there is no Shorts endpoint. The equivalent limits, also surfaced in the UI:
+uploads from an unaudited API project are locked to private, there are 100 uploads
+per day, and a consent screen left in "Testing" expires the link after 7 days.
+Unlike TikTok, Google allows a `localhost` redirect, so linking needs no tunnel.
+Setup: [`YOUTUBE_SETUP.md`](YOUTUBE_SETUP.md).
 
 **Recovery controls** — cancel a running stage, step back or step forward through
 stages, and retry a failed step. Interrupted stages are detected on restart.
@@ -323,15 +339,16 @@ backend/
   seed.py          default presets and settings
   adapters/        base interfaces + llm / tts / image / video / animation + registry
   animation/       Manim template catalog, narration cue sync, LaTeX detection
-  routers/         projects, characters, presets, settings, ideas, voices, music, media, tiktok
-  services/        ffmpeg, jamendo, music_library, tiktok
+  routers/         projects, characters, presets, settings, ideas, voices, music,
+                   media, tiktok, youtube
+  services/        ffmpeg, jamendo, music_library, tiktok, youtube
 frontend/src/
   App.jsx          sidebar + routes
   api.js           relative-path API client
   useEvents.js     WebSocket subscription
   pages/           Board, ProjectDetail, Characters, Ideas, Settings
 tests/             unittest: animation (spec/merge/sync/pipeline), cast, character
-                   groups, asset selection, subtitles, TikTok, TTS chunking
+                   groups, asset selection, subtitles, TikTok, YouTube, TTS chunking
 ```
 
 The tests are stdlib `unittest`, so they need no extra dependency:

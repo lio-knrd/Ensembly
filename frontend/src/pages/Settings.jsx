@@ -5,8 +5,35 @@ import { api } from "../api.js";
 import AudioPlayer from "../components/AudioPlayer.jsx";
 import Loading from "../components/Loading.jsx";
 
+/** Read and clear the ?..._linked / ?..._error the OAuth callbacks redirect with.
+ *
+ * Both callbacks can only report back through the URL, so without this a failed
+ * link lands on a silently unchanged page. Cleared from the address bar once
+ * read, so a reload does not resurrect a stale message.
+ */
+function useLinkCallbackNotice() {
+  const [notice, setNotice] = useState(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const found = ["tiktok", "youtube"]
+      .map((service) => {
+        const linked = params.get(`${service}_linked`);
+        const error = params.get(`${service}_error`);
+        if (linked) return { service, ok: true, message: `Linked ${linked}.` };
+        if (error) return { service, ok: false, message: error };
+        return null;
+      })
+      .find(Boolean);
+    if (!found) return;
+    setNotice(found);
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+  return [notice, () => setNotice(null)];
+}
+
 export default function Settings() {
   const qc = useQueryClient();
+  const [linkNotice, dismissLinkNotice] = useLinkCallbackNotice();
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const [duration, setDuration] = useState("");
   const [imageModel, setImageModel] = useState("");
@@ -40,9 +67,22 @@ export default function Settings() {
         </div>
       </div>
 
+      {linkNotice && (
+        <div className={"banner banner-notice" + (linkNotice.ok ? " success" : "")}>
+          <span>
+            <strong>{linkNotice.service === "youtube" ? "YouTube" : "TikTok"}:</strong>{" "}
+            {linkNotice.message}
+          </span>
+          <button className="btn ghost sm" onClick={dismissLinkNotice}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <PresetSection kind="platform" />
       <PresetSection kind="content" />
       <TikTokPanel />
+      <YouTubePanel />
 
       <div className="panel">
         <h2>Defaults</h2>
@@ -317,6 +357,190 @@ function TikTokAccountRow({ account, onChange }) {
   );
 }
 
+function YouTubePanel() {
+  const qc = useQueryClient();
+  const { data: status } = useQuery({ queryKey: ["youtube"], queryFn: api.youtubeStatus });
+  const [pending, setPending] = useState(null); // { url, state } while a login is open
+  const [pastedUrl, setPastedUrl] = useState("");
+  const [error, setError] = useState("");
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["youtube"] });
+    qc.invalidateQueries({ queryKey: ["contentPresets"] });
+  };
+
+  const start = useMutation({
+    mutationFn: () => api.youtubeLinkStart({}),
+    onSuccess: (data) => {
+      setError("");
+      setPending(data);
+      window.open(data.url, "_blank", "noopener");
+    },
+    onError: (err) => setError(err.message),
+  });
+  const complete = useMutation({
+    mutationFn: () =>
+      api.youtubeLinkComplete({ redirected_url: pastedUrl.trim(), state: pending?.state }),
+    onSuccess: () => {
+      setError("");
+      setPending(null);
+      setPastedUrl("");
+      invalidate();
+    },
+    onError: (err) => setError(err.message),
+  });
+
+  // Google redirects back here, so a finished link shows up on a refetch even
+  // though this tab never saw the code.
+  useEffect(() => {
+    if (!pending) return undefined;
+    const timer = setInterval(() => {
+      qc.invalidateQueries({ queryKey: ["youtube"] });
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [pending, qc]);
+
+  if (!status) return null;
+
+  return (
+    <div className="panel">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div>
+          <h2>YouTube publishing</h2>
+          <p className="panel-sub">
+            Channels are linked once here, then any content preset picks one to
+            upload to. A 9:16 render under 3 minutes becomes a Short on its own.
+          </p>
+        </div>
+        <button
+          className="btn sm"
+          disabled={!status.configured || start.isPending}
+          onClick={() => start.mutate()}
+          title={
+            status.configured
+              ? undefined
+              : "Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET first"
+          }
+        >
+          <Link2 />
+          {start.isPending ? "Opening..." : "Link channel"}
+        </button>
+      </div>
+
+      {!status.configured && (
+        <div className="banner compact">
+          Set <code>YOUTUBE_CLIENT_ID</code> and <code>YOUTUBE_CLIENT_SECRET</code> in
+          <code> .env</code> (from your Google Cloud OAuth client), then restart.
+        </div>
+      )}
+      {status.configured && (
+        <div className="key-row">
+          <span>Redirect URI (must be registered on the OAuth client)</span>
+          <span className="model-code">{status.redirect_uri}</span>
+        </div>
+      )}
+
+      {pending && (
+        <div className="style-assistant">
+          <label className="preset-field-label">
+            Approve in the tab that opened. This finishes on its own - only paste
+            the URL if the browser could not reach this app.
+          </label>
+          <input
+            value={pastedUrl}
+            placeholder={`${status.redirect_uri}?code=...&state=...`}
+            onChange={(e) => setPastedUrl(e.target.value)}
+          />
+          <div className="row" style={{ justifyContent: "space-between", marginTop: 8 }}>
+            <span className="style-assistant-note">
+              Waiting for Google to redirect back...
+            </span>
+            <div className="row">
+              <button
+                className="btn ghost sm"
+                onClick={() => {
+                  setPending(null);
+                  setPastedUrl("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn sm primary"
+                disabled={!pastedUrl.trim() || complete.isPending}
+                onClick={() => complete.mutate()}
+              >
+                {complete.isPending ? "Linking..." : "Complete link"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {error && <div className="banner compact">{error}</div>}
+
+      {status.accounts.length === 0 ? (
+        <div className="key-row">
+          <span>No channels linked yet.</span>
+        </div>
+      ) : (
+        status.accounts.map((account) => (
+          <YouTubeAccountRow key={account.id} account={account} onChange={invalidate} />
+        ))
+      )}
+
+      <p className="panel-sub" style={{ marginTop: 12 }}>
+        Until Google audits the API project, every upload is locked to private -
+        publish it from YouTube Studio, or schedule it here. Uploads are capped
+        at 100 per day, and while the OAuth consent screen is in Testing a link
+        expires after 7 days.
+      </p>
+    </div>
+  );
+}
+
+function YouTubeAccountRow({ account, onChange }) {
+  const refresh = useMutation({
+    mutationFn: () => api.youtubeRefreshAccount(account.id),
+    onSuccess: onChange,
+  });
+  const unlink = useMutation({
+    mutationFn: () => api.youtubeUnlink(account.id),
+    onSuccess: onChange,
+  });
+  const groups = account.groups.map((g) => g.name).join(", ");
+
+  return (
+    <div className="key-row">
+      <span>
+        <strong>{account.title || account.channel_id}</strong>
+        <span className="model-code" style={{ marginLeft: 8 }}>
+          {groups || "no group selected"}
+        </span>
+        {account.needs_relink && (
+          <span className="key-status missing" style={{ marginLeft: 8 }}>
+            <Minus />
+            re-link needed
+          </span>
+        )}
+        {account.last_error && <div className="form-error">{account.last_error}</div>}
+      </span>
+      <span className="row">
+        <button className="btn sm" disabled={refresh.isPending} onClick={() => refresh.mutate()}>
+          <RefreshCw />
+          {refresh.isPending ? "Refreshing..." : "Refresh"}
+        </button>
+        <button
+          className="btn sm danger"
+          disabled={unlink.isPending}
+          onClick={() => unlink.mutate()}
+        >
+          <Trash2 />
+          Unlink
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function PresetSection({ kind }) {
   const qc = useQueryClient();
   const isPlatform = kind === "platform";
@@ -345,6 +569,11 @@ function PresetSection({ kind }) {
     queryFn: api.tiktokStatus,
     enabled: !isPlatform,
   });
+  const { data: youtube } = useQuery({
+    queryKey: ["youtube"],
+    queryFn: api.youtubeStatus,
+    enabled: !isPlatform,
+  });
   const invalidate = () => qc.invalidateQueries({ queryKey: [key] });
   const [adding, setAdding] = useState(false);
 
@@ -369,6 +598,7 @@ function PresetSection({ kind }) {
           styleField={styleField}
           voiceOptions={voices}
           tiktokAccounts={tiktok?.accounts || []}
+          youtubeAccounts={youtube?.accounts || []}
           onSave={(body) => update(p.id, body).then(invalidate)}
           onDelete={() => remove(p.id).then(invalidate)}
         />
@@ -395,6 +625,7 @@ function PresetEditor({
   styleField,
   voiceOptions = [],
   tiktokAccounts = [],
+  youtubeAccounts = [],
   isNew,
   onSave,
   onDelete,
@@ -414,6 +645,7 @@ function PresetEditor({
   const [styleError, setStyleError] = useState("");
   const [isDefault, setIsDefault] = useState(preset.is_default);
   const [accountId, setAccountId] = useState(preset.tiktok_account_id || "");
+  const [ytAccountId, setYtAccountId] = useState(preset.youtube_account_id || "");
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
   // The account lives behind its own endpoint, so it saves on change instead of
@@ -422,6 +654,13 @@ function PresetEditor({
     mutationFn: (id) => api.tiktokSelectGroupAccount(preset.id, id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["tiktok"] });
+      qc.invalidateQueries({ queryKey: ["contentPresets"] });
+    },
+  });
+  const selectYtAccount = useMutation({
+    mutationFn: (id) => api.youtubeSelectGroupAccount(preset.id, id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["youtube"] });
       qc.invalidateQueries({ queryKey: ["contentPresets"] });
     },
   });
@@ -604,6 +843,30 @@ function PresetEditor({
                 {tiktokAccounts.length
                   ? "Pick an account already linked in TikTok publishing below. Saved immediately."
                   : "No accounts linked yet - link one in TikTok publishing below."}
+              </div>
+              <label className="preset-field-label">YouTube channel</label>
+              <select
+                value={ytAccountId}
+                disabled={selectYtAccount.isPending}
+                onChange={(e) => {
+                  setYtAccountId(e.target.value);
+                  selectYtAccount.mutate(e.target.value);
+                }}
+              >
+                <option value="">Not published to YouTube</option>
+                {youtubeAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.title || account.channel_id}
+                    {account.groups.length
+                      ? ` (also: ${account.groups.map((g) => g.name).join(", ")})`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+              <div className="style-assistant-note">
+                {youtubeAccounts.length
+                  ? "Pick a channel already linked in YouTube publishing below. Saved immediately."
+                  : "No channels linked yet - link one in YouTube publishing below."}
               </div>
             </>
           )}

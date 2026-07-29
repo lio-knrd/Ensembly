@@ -1158,6 +1158,7 @@ function FinalPanel({ project, metadata }) {
         </div>
       </div>
       <TikTokPublish project={project} />
+      <YouTubePublish project={project} />
     </div>
   );
 }
@@ -1284,6 +1285,177 @@ function TikTokPublish({ project }) {
               <span className="model-code">
                 {status.status}
                 {status.fail_reason ? ` (${status.fail_reason})` : ""}
+              </span>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function YouTubePublish({ project }) {
+  const { data: target } = useQuery({
+    queryKey: ["youtube-target", project.id],
+    queryFn: () => api.youtubePublishTarget(project.id),
+  });
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [privacy, setPrivacy] = useState("private");
+  const [setThumbnail, setSetThumbnail] = useState(false);
+  const [result, setResult] = useState(null);
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    if (target?.title) setTitle(target.title);
+  }, [target?.title]);
+  useEffect(() => {
+    if (target?.description) setDescription(target.description);
+  }, [target?.description]);
+
+  const publish = useMutation({
+    mutationFn: () =>
+      api.youtubePublish(project.id, {
+        title,
+        description,
+        privacy_status: privacy,
+        set_thumbnail: setThumbnail,
+      }),
+    onSuccess: (data) => {
+      setResult(data);
+      setStatus(null);
+    },
+  });
+  const check = useMutation({
+    mutationFn: () => api.youtubePublishStatus(project.id, result.video_id),
+    onSuccess: (data) => setStatus(data),
+  });
+
+  if (!target) return null;
+
+  const blocked = !target.configured
+    ? "YouTube is not configured in .env."
+    : !target.group
+    ? "This project has no content preset, so there is no channel to upload to."
+    : !target.channel
+    ? `The "${target.group.name}" group has no YouTube channel selected. Pick one in Settings.`
+    : !target.video_ready
+    ? "No finished video to publish yet."
+    : "";
+
+  // The API project's audit state is invisible until an upload comes back, so
+  // a downgrade is reported from what YouTube actually applied.
+  const forcedPrivate =
+    result && result.privacy_status && result.privacy_status !== result.requested_privacy;
+
+  return (
+    <div className="panel-inset">
+      <h3>Publish to YouTube</h3>
+      {blocked ? (
+        <div className="banner compact">{blocked}</div>
+      ) : (
+        <>
+          <div className="key-row">
+            <span>
+              Uploading to <strong>{target.channel.title || target.channel.channel_id}</strong>
+              {" via "}
+              {target.group.name}
+            </span>
+            <span className="model-code">{Math.round(target.video_bytes / 1048576)} MB</span>
+          </div>
+          {target.channel.needs_relink && (
+            <div className="banner compact">
+              This channel needs to be linked again in Settings.
+            </div>
+          )}
+          <div className="field">
+            <label>Title (max {target.max_title_chars})</label>
+            <input
+              value={title}
+              maxLength={target.max_title_chars}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label>Description</label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
+          </div>
+          <div className="field">
+            <label>Privacy</label>
+            <select value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
+              {target.privacy_levels.map((level) => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
+            <span className="style-assistant-note">
+              Until the API project passes YouTube's audit, every upload is
+              locked to private no matter what is picked here - flip it in
+              YouTube Studio afterwards.
+            </span>
+          </div>
+          {target.has_title_card && (
+            <label className="row" style={{ fontSize: 13, cursor: "pointer", gap: 8 }}>
+              <input
+                type="checkbox"
+                style={{ width: "auto" }}
+                checked={setThumbnail}
+                onChange={(e) => setSetThumbnail(e.target.checked)}
+              />
+              Use the title card as the thumbnail (needs a phone-verified channel)
+            </label>
+          )}
+          {publish.isError && <div className="banner compact">{String(publish.error.message)}</div>}
+          {check.isError && <div className="banner compact">{String(check.error.message)}</div>}
+          <div className="row">
+            <button
+              className="btn primary"
+              disabled={publish.isPending || !title.trim()}
+              onClick={() => publish.mutate()}
+            >
+              <Upload />
+              {publish.isPending ? "Uploading..." : "Upload"}
+            </button>
+            {result?.video_id && (
+              <button className="btn" disabled={check.isPending} onClick={() => check.mutate()}>
+                <RefreshCw />
+                {check.isPending ? "Checking..." : "Check status"}
+              </button>
+            )}
+          </div>
+          {result?.thumbnail_error && (
+            <div className="banner compact">
+              Video uploaded, but the thumbnail failed: {result.thumbnail_error}
+            </div>
+          )}
+          {forcedPrivate && (
+            <div className="banner compact">
+              YouTube set this to {result.privacy_status} instead of{" "}
+              {result.requested_privacy} - the API project is not audited yet.
+            </div>
+          )}
+          {result?.video_id && (
+            <div className="key-row">
+              <span>Video</span>
+              <span className="row">
+                <a className="btn sm" href={result.url} target="_blank" rel="noreferrer">
+                  Watch
+                </a>
+                <a className="btn sm" href={result.studio_url} target="_blank" rel="noreferrer">
+                  Edit in Studio
+                </a>
+              </span>
+            </div>
+          )}
+          {status && (
+            <div className="key-row">
+              <span>Status</span>
+              <span className="model-code">
+                {status.upload_status || status.processing_status || "unknown"}
+                {status.privacy_status ? ` / ${status.privacy_status}` : ""}
+                {status.failure_reason ? ` (${status.failure_reason})` : ""}
+                {status.rejection_reason ? ` (${status.rejection_reason})` : ""}
               </span>
             </div>
           )}

@@ -75,6 +75,15 @@ class Settings(BaseModel):
     # client configurations, so it follows the app's registered type.
     tiktok_use_pkce: bool = _bool(os.getenv("TIKTOK_USE_PKCE"), False)
 
+    # --- YouTube (Google OAuth + Data API v3) ---
+    # One Google Cloud OAuth client authorizes many channels; the per-channel
+    # tokens live in the database, so only the client credentials belong here.
+    youtube_client_id: str = os.getenv("YOUTUBE_CLIENT_ID", "").strip()
+    youtube_client_secret: str = os.getenv("YOUTUBE_CLIENT_SECRET", "").strip()
+    # Unlike TikTok, Google exempts localhost from the https rule, so the default
+    # loopback callback works for a local install with no tunnel.
+    youtube_redirect_uri: str = os.getenv("YOUTUBE_REDIRECT_URI", "").strip()
+
     default_llm_provider: str = os.getenv("DEFAULT_LLM_PROVIDER", "anthropic").strip().lower()
 
     # --- App config ---
@@ -117,6 +126,18 @@ class Settings(BaseModel):
         return ROOT_DIR
 
     @property
+    def youtube_redirect(self) -> str:
+        """The redirect URI to send Google, defaulting to the loopback callback.
+
+        Google allows http on localhost, so a local install needs no tunnel —
+        but whatever is used here must match a URI registered on the OAuth
+        client *exactly*, which is why an explicit override stays available.
+        """
+        return self.youtube_redirect_uri or (
+            f"http://localhost:{self.app_port}/api/youtube/link/callback"
+        )
+
+    @property
     def db_file(self) -> Path:
         """Filesystem path of the SQLite db (derived from database_url)."""
         url = self.database_url
@@ -140,6 +161,7 @@ class Settings(BaseModel):
             "krea": bool(self.krea_api_key),
             "jamendo": bool(self.jamendo_client_id),
             "tiktok": bool(self.tiktok_client_key and self.tiktok_client_secret),
+            "youtube": bool(self.youtube_client_id and self.youtube_client_secret),
         }
 
 
