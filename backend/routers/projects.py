@@ -30,6 +30,7 @@ from ..models import (
     SceneType,
     Stage,
     TikTokAccount,
+    YouTubeAccount,
 )
 from ..schemas import (
     CastSheetGenerate,
@@ -44,11 +45,14 @@ from ..schemas import (
     TitleCardGenerate,
     TitleCardSelect,
     TitleCardUpdate,
+    YouTubePublishIn,
 )
 from ..events import bus
 from ..services import tiktok as tiktok_service
+from ..services import youtube as youtube_service
 from ..services.music_library import apply_default as apply_default_music
 from .tiktok import ensure_access_token as ensure_tiktok_token
+from .youtube import ensure_access_token as ensure_youtube_token
 from ..storage import slugify
 from .common import (
     default_content_preset,
@@ -463,6 +467,180 @@ def tiktok_publish_status(
     try:
         return tiktok_service.publish_status(token, publish_id)
     except tiktok_service.TikTokError as exc:
+        raise HTTPException(502, str(exc))
+
+
+def _youtube_publish_account(session: Session, project: Project) -> YouTubeAccount:
+    """The channel this project posts to — its group's, and only its group's."""
+    preset = (
+        session.get(ContentPreset, project.content_preset_id)
+        if project.content_preset_id
+        else None
+    )
+    if not preset:
+        raise HTTPException(400, "This project has no group, so there is no YouTube channel.")
+    if not preset.youtube_account_id:
+        raise HTTPException(
+            400, f"The group \"{preset.name}\" has no YouTube channel selected yet."
+        )
+    account = session.get(YouTubeAccount, preset.youtube_account_id)
+    if not account:
+        raise HTTPException(400, "The group's YouTube channel is no longer linked.")
+    return account
+
+
+def _youtube_defaults(project: Project) -> dict:
+    """Title/description/tags for this project, in YouTube's shape.
+
+    TikTok gets one caption blob; YouTube wants the three apart, so the
+    hashtags are appended to the description (where YouTube surfaces the first
+    few above the title) *and* kept as tags.
+    """
+    metadata = project_metadata(project.folder_path)
+    hashtags = [str(tag) for tag in (metadata.get("hashtags") or [])]
+    description = str(metadata.get("description", "") or "").strip()
+    tag_line = " ".join(t if t.startswith("#") else f"#{t}" for t in hashtags).strip()
+    if tag_line:
+        description = f"{description}\n\n{tag_line}".strip()
+    return {
+        "title": str(metadata.get("title", "") or project.title).strip(),
+        "description": description,
+        "tags": hashtags,
+    }
+
+
+def _title_card_file(project: Project) -> Path | None:
+    if not project.title_card_path:
+        return None
+    path = Path(settings.projects_dir.parent.parent) / project.title_card_path
+    return path if path.is_file() else None
+
+
+@router.get("/{project_id}/publish/youtube")
+def youtube_publish_target(project_id: str, session: Session = Depends(get_session)):
+    """What this project would upload as, so the UI can show it beforehand."""
+    project = _require(session, project_id)
+    preset = (
+        session.get(ContentPreset, project.content_preset_id)
+        if project.content_preset_id
+        else None
+    )
+    account = (
+        session.get(YouTubeAccount, preset.youtube_account_id)
+        if preset and preset.youtube_account_id
+        else None
+    )
+    video = _final_video_path(project)
+    defaults = _youtube_defaults(project)
+    return {
+        "configured": youtube_service.is_configured(),
+        "group": {"id": preset.id, "name": preset.name} if preset else None,
+        "channel": (
+            {
+                "id": account.id,
+                "title": account.title,
+                "handle": account.handle,
+                "channel_id": account.channel_id,
+                "avatar_url": account.avatar_url,
+                "needs_relink": account.needs_relink,
+            }
+            if account
+            else None
+        ),
+        "video_ready": bool(video),
+        "video_bytes": video.stat().st_size if video else 0,
+        "has_title_card": bool(_title_card_file(project)),
+        "privacy_levels": list(youtube_service.PRIVACY_LEVELS),
+        "max_title_chars": youtube_service.MAX_TITLE_CHARS,
+        # A Short is classified from the file, so this is informational only.
+        "max_short_seconds": youtube_service.MAX_SHORT_SECONDS,
+        **defaults,
+    }
+
+
+@router.post("/{project_id}/publish/youtube")
+def publish_to_youtube(
+    project_id: str,
+    body: YouTubePublishIn,
+    session: Session = Depends(get_session),
+):
+    """Upload the finished render to the group's YouTube channel."""
+    project = _require(session, project_id)
+    video = _final_video_path(project)
+    if not video:
+        raise HTTPException(400, "This project has no finished video to publish yet.")
+    account = _youtube_publish_account(session, project)
+    token = ensure_youtube_token(session, account)
+    defaults = _youtube_defaults(project)
+    snippet = youtube_service.build_snippet(
+        title=body.title if body.title is not None else defaults["title"],
+        description=(
+            body.description if body.description is not None else defaults["description"]
+        ),
+        tags=body.tags if body.tags is not None else defaults["tags"],
+        category_id=body.category_id,
+    )
+    try:
+        session_uri = youtube_service.start_resumable_upload(
+            token,
+            video_bytes=video.stat().st_size,
+            snippet=snippet,
+            privacy_status=body.privacy_status,
+            publish_at=body.publish_at,
+            made_for_kids=body.made_for_kids,
+            notify_subscribers=body.notify_subscribers,
+        )
+        result = youtube_service.upload_video(session_uri, video)
+    except youtube_service.YouTubeNeedsRelink as exc:
+        account.needs_relink = True
+        account.last_error = str(exc)
+        session.add(account)
+        session.commit()
+        raise HTTPException(400, str(exc))
+    except youtube_service.YouTubeError as exc:
+        raise HTTPException(502, str(exc))
+
+    video_id = str(result.get("id", ""))
+    # A thumbnail failure must not read as a failed upload — the video is up.
+    thumbnail_error = ""
+    title_card = _title_card_file(project)
+    if body.set_thumbnail and video_id and title_card:
+        try:
+            youtube_service.set_thumbnail(token, video_id, title_card)
+        except youtube_service.YouTubeError as exc:
+            thumbnail_error = str(exc)
+
+    status = (result.get("status", {}) or {})
+    return {
+        "video_id": video_id,
+        "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+        "studio_url": (
+            f"https://studio.youtube.com/video/{video_id}/edit" if video_id else ""
+        ),
+        "account_id": account.id,
+        "title": snippet["title"],
+        "requested_privacy": body.privacy_status,
+        # What YouTube actually applied. An unaudited API project forces
+        # private, so this is how the UI can tell the creator what happened.
+        "privacy_status": status.get("privacyStatus", ""),
+        "upload_status": status.get("uploadStatus", ""),
+        "publish_at": status.get("publishAt", ""),
+        "thumbnail_error": thumbnail_error,
+    }
+
+
+@router.get("/{project_id}/publish/youtube/status")
+def youtube_publish_status(
+    project_id: str,
+    video_id: str,
+    session: Session = Depends(get_session),
+):
+    project = _require(session, project_id)
+    account = _youtube_publish_account(session, project)
+    token = ensure_youtube_token(session, account)
+    try:
+        return youtube_service.video_status(token, video_id)
+    except youtube_service.YouTubeError as exc:
         raise HTTPException(502, str(exc))
 
 

@@ -28,6 +28,9 @@ Leave the keys blank to run fully offline, or fill any of:
 | Script | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` + `DEFAULT_LLM_PROVIDER` | Anthropic / OpenAI |
 | Audio + timestamps | `ELEVENLABS_API_KEY` | ElevenLabs |
 | Images & video | `KREA_API_KEY` / `FAL_API_KEY` | Direct Krea for Krea 2; fal.ai for other image/video models |
+| Music | `JAMENDO_CLIENT_ID` | Jamendo royalty-free soundtrack search |
+| Publishing | `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` | TikTok Content Posting |
+| Publishing | `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET` | YouTube Data API v3 — see [`YOUTUBE_SETUP.md`](YOUTUBE_SETUP.md) |
 
 ## 2. Install & build
 
@@ -81,7 +84,12 @@ cd frontend && npm run dev      # http://localhost:5173
 3. **Character library** — global characters (name, description, reference image)
    referenced across projects for identity-locked visuals.
 4. **Idea backlog** — queue topics and convert them into projects.
-5. **Settings** — edit platform & content presets (the two editable prompt
+5. **Publishing** — link a TikTok account or a YouTube channel once in Settings,
+   then pick it on a content preset. Any finished project in that group can be
+   posted from its **Final video** panel. Both platforms restrict what an
+   unaudited developer app may publish, so start with a TikTok draft or a private
+   YouTube upload — details in [`YOUTUBE_SETUP.md`](YOUTUBE_SETUP.md).
+6. **Settings** — edit platform & content presets (the two editable prompt
    layers), set defaults, and check which API keys / FFmpeg are loaded. Each
    **content preset** has a separate **Image style** field — a look applied to all
    generated images (character sheets + scenes) so you don't tweak per-scene
@@ -99,5 +107,6 @@ data/
     audio/  images/  clips/  final/<slug>.mp4 + metadata.json
 ```
 
-The finished MP4 and its social metadata are in `final/`. Nothing is auto-posted —
-upload it manually.
+The finished MP4 and its social metadata are in `final/`. Upload it manually, or
+publish it from the project page to the TikTok account / YouTube channel the
+project's content preset points at.

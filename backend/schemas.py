@@ -174,6 +174,44 @@ class TikTokPublishIn(BaseModel):
     disable_stitch: bool = False
 
 
+# --- YouTube ---
+# Kept out of ContentPresetIn for the same reason as the TikTok account: it is
+# set through /api/youtube/groups/{id}/account instead.
+class YouTubeLinkStart(BaseModel):
+    content_preset_id: Optional[str] = None
+
+
+class YouTubeLinkComplete(BaseModel):
+    # Google redirects to localhost, so the callback normally completes on its
+    # own; pasting the URL stays available for odd setups.
+    redirected_url: Optional[str] = None
+    code: Optional[str] = None
+    state: Optional[str] = None
+
+
+class YouTubeAccountSelect(BaseModel):
+    account_id: Optional[str] = None
+
+
+class YouTubePublishIn(BaseModel):
+    # Default private: an unaudited API project has its uploads forced private
+    # anyway, so this is what actually happens rather than a promise we cannot
+    # keep. The creator flips it in Studio, or schedules it with publish_at.
+    privacy_status: Literal["private", "unlisted", "public"] = "private"
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[list[str]] = None
+    # People & Blogs. See videoCategories.list for the full set.
+    category_id: str = "22"
+    # RFC 3339 instant; only honoured together with privacyStatus private.
+    publish_at: Optional[str] = None
+    made_for_kids: bool = False
+    notify_subscribers: bool = True
+    # Upload the project's title card as the video thumbnail. Off by default:
+    # it needs a phone-verified channel and is ignored for Shorts playback.
+    set_thumbnail: bool = False
+
+
 class StyleSuggestionIn(BaseModel):
     content_prompt: str = ""
     current_style_prompt: str = ""

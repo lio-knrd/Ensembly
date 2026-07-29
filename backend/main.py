@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +12,17 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .database import init_db
 from .events import bus
-from .routers import characters, ideas, media, music, presets, projects, tiktok, voices
+from .routers import (
+    characters,
+    ideas,
+    media,
+    music,
+    presets,
+    projects,
+    tiktok,
+    voices,
+    youtube,
+)
 from .routers import settings as settings_router
 from .seed import seed
 
@@ -36,6 +46,7 @@ app.include_router(voices.router)
 app.include_router(music.router)
 app.include_router(media.router)
 app.include_router(tiktok.router)
+app.include_router(youtube.router)
 
 
 @app.on_event("startup")
@@ -64,15 +75,46 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
 # --------------------------------------------------------------------------- #
 # Serve the built frontend (single-command production run). During development
-# the frontend runs under Vite; this block is a no-op until `npm run build`.
+# the frontend runs under Vite; the index fallback is inert until `npm run build`.
 # --------------------------------------------------------------------------- #
 _DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+# Files dropped in here are served from the site root. This is where a platform's
+# domain-ownership proof goes — e.g. TikTok's URL-property signature file, which
+# has to answer at `https://<host>/<their-filename>`. Kept outside frontend/dist
+# because `npm run build` wipes that directory.
+_VERIFICATION_DIR = settings.root_dir / "data" / "verification"
+
 if _DIST.exists():
     app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
 
-    @app.get("/{full_path:path}")
-    def spa(full_path: str):
-        candidate = _DIST / full_path
-        if full_path and candidate.is_file():
-            return FileResponse(candidate)
-        return FileResponse(_DIST / "index.html")
+
+def _safe_file(root: Path, rel: str) -> Path | None:
+    """Resolve ``rel`` inside ``root``, refusing anything that escapes it.
+
+    Without the containment check a request for `../../.env` would be served
+    straight off disk, since this handler matches every unclaimed path.
+    """
+    if not rel:
+        return None
+    try:
+        candidate = (root / rel).resolve()
+        candidate.relative_to(root.resolve())
+    except (ValueError, OSError):
+        return None
+    return candidate if candidate.is_file() else None
+
+
+@app.get("/{full_path:path}")
+def spa(full_path: str):
+    proof = _safe_file(_VERIFICATION_DIR, full_path)
+    if proof:
+        return FileResponse(proof)
+    asset = _safe_file(_DIST, full_path)
+    if asset:
+        return FileResponse(asset)
+    index = _DIST / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    raise HTTPException(
+        503, "The frontend is not built yet. Run `npm run build` in frontend/."
+    )

@@ -164,6 +164,31 @@ export const api = {
       `/api/projects/${pid}/publish/tiktok/status?publish_id=${encodeURIComponent(publishId)}`
     ),
 
+  // YouTube
+  youtubeStatus: () => req("/api/youtube/status"),
+  youtubeLinkStart: (body) =>
+    req("/api/youtube/link/start", { method: "POST", body: JSON.stringify(body || {}) }),
+  youtubeLinkComplete: (body) =>
+    req("/api/youtube/link/complete", { method: "POST", body: JSON.stringify(body) }),
+  youtubeUnlink: (id) => req(`/api/youtube/accounts/${id}`, { method: "DELETE" }),
+  youtubeRefreshAccount: (id) =>
+    req(`/api/youtube/accounts/${id}/refresh`, { method: "POST" }),
+  youtubeSelectGroupAccount: (groupId, accountId) =>
+    req(`/api/youtube/groups/${groupId}/account`, {
+      method: "PUT",
+      body: JSON.stringify({ account_id: accountId || null }),
+    }),
+  youtubePublishTarget: (pid) => req(`/api/projects/${pid}/publish/youtube`),
+  youtubePublish: (pid, body) =>
+    req(`/api/projects/${pid}/publish/youtube`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  youtubePublishStatus: (pid, videoId) =>
+    req(
+      `/api/projects/${pid}/publish/youtube/status?video_id=${encodeURIComponent(videoId)}`
+    ),
+
   // Presets
   listPlatformPresets: () => req("/api/presets/platform"),
   createPlatformPreset: (body) =>
