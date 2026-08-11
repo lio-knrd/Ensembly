@@ -67,10 +67,21 @@ class Project(SQLModel, table=True):
     # the creator did not explicitly provide one.
     title_is_custom: bool = False
     topic_prompt: str
-    platform_preset_id: Optional[str] = Field(default=None, foreign_key="platform_presets.id")
-    content_preset_id: Optional[str] = Field(default=None, foreign_key="content_presets.id")
+    platform_preset_id: Optional[str] = Field(
+        default=None, foreign_key="platform_presets.id", ondelete="SET NULL"
+    )
+    content_preset_id: Optional[str] = Field(
+        default=None, foreign_key="content_presets.id", ondelete="SET NULL"
+    )
     target_duration_seconds: int = 75
-    music_track_id: Optional[str] = Field(default=None, foreign_key="music_tracks.id")
+    # Free-form creator feedback carried into every later generation for this
+    # project: what the last script got wrong, misleading claims to drop, things
+    # to spell out. Fed to the script prompt AND to animation authoring, so a
+    # correction survives a regenerate instead of being a one-shot instruction.
+    revision_notes: str = ""
+    music_track_id: Optional[str] = Field(
+        default=None, foreign_key="music_tracks.id", ondelete="SET NULL"
+    )
     music_enabled: bool = True
     music_volume: float = 0.075
     # Burned-in subtitles. Both live on the project (never on a preset or a
@@ -152,7 +163,7 @@ class Character(SQLModel, table=True):
     # a cat-cartoon group are separate library entries. NULL means ungrouped:
     # reachable only from the library, never matched into a project's cast.
     content_preset_id: Optional[str] = Field(
-        default=None, foreign_key="content_presets.id", index=True
+        default=None, foreign_key="content_presets.id", index=True, ondelete="SET NULL"
     )
     name: str
     description: str = ""
@@ -225,10 +236,14 @@ class ContentPreset(SQLModel, table=True):
     enable_animations: bool = False
     # Which linked TikTok account this group publishes as. Groups pick from the
     # accounts already in the app, so one login can serve several groups.
-    tiktok_account_id: Optional[str] = Field(default=None, foreign_key="tiktok_accounts.id")
+    tiktok_account_id: Optional[str] = Field(
+        default=None, foreign_key="tiktok_accounts.id", ondelete="SET NULL"
+    )
     # The same, per destination: a group can publish to TikTok, to YouTube, to
     # both, or to neither, so the two selections are independent.
-    youtube_account_id: Optional[str] = Field(default=None, foreign_key="youtube_accounts.id")
+    youtube_account_id: Optional[str] = Field(
+        default=None, foreign_key="youtube_accounts.id", ondelete="SET NULL"
+    )
     is_default: bool = False
 
 
@@ -327,7 +342,9 @@ class Idea(SQLModel, table=True):
     text: str
     target_duration_seconds: int = 75
     notes: Optional[str] = None
-    plan_id: Optional[str] = Field(default=None, foreign_key="editorial_plans.id", index=True)
+    plan_id: Optional[str] = Field(
+        default=None, foreign_key="editorial_plans.id", index=True, ondelete="SET NULL"
+    )
     created_at: datetime = Field(default_factory=_now)
 
 
@@ -341,9 +358,15 @@ class EditorialPlan(SQLModel, table=True):
     description: str = ""
     editorial_rules: str = ""
     ordering_mode: str = "custom"
-    parent_plan_id: Optional[str] = Field(default=None, foreign_key="editorial_plans.id", index=True)
-    platform_preset_id: Optional[str] = Field(default=None, foreign_key="platform_presets.id")
-    content_preset_id: Optional[str] = Field(default=None, foreign_key="content_presets.id")
+    parent_plan_id: Optional[str] = Field(
+        default=None, foreign_key="editorial_plans.id", index=True, ondelete="SET NULL"
+    )
+    platform_preset_id: Optional[str] = Field(
+        default=None, foreign_key="platform_presets.id", ondelete="SET NULL"
+    )
+    content_preset_id: Optional[str] = Field(
+        default=None, foreign_key="content_presets.id", ondelete="SET NULL"
+    )
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -363,7 +386,9 @@ class EditorialItem(SQLModel, table=True):
     source_type: str = "manual"
     order_index: int = 0
     target_duration_seconds: int = 75
-    project_id: Optional[str] = Field(default=None, foreign_key="projects.id")
+    project_id: Optional[str] = Field(
+        default=None, foreign_key="projects.id", index=True, ondelete="SET NULL"
+    )
     external_url: str = ""
     part_group_id: Optional[str] = Field(default=None, index=True)
     part_group_title: str = ""

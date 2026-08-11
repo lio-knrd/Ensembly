@@ -758,6 +758,7 @@ def generate_script(project_id: str) -> None:
                 project.target_duration_seconds,
                 enable_animations=enable_animations,
                 latex_available=_latex_available(),
+                revision_notes=project.revision_notes,
             )
             script = gen.generate(
                 prompts.CORE_SYSTEM_PROMPT,
@@ -1647,17 +1648,26 @@ def _render_scene_animation(session, project: Project, scene: Scene, folder: Pat
         # and length. Any existing code (a user edit / older project) is reused.
         _set_msg(session, project, f"Writing animation for scene {scene.order_index + 1}…")
         authored = author_manim_code(
-            scene.narration_text, duration, latex, _content_animation_style(session, project)
+            scene.narration_text,
+            duration,
+            latex,
+            _content_animation_style(session, project),
+            project.revision_notes,
         )
         spec = normalize_spec({"code": authored, "title": ""}) if authored else None
         if spec:
             _persist_animation_code(session, scene, spec, spec["code"])
     if not spec:
+        # Authoring refuses incomplete or unparseable programs, so landing here
+        # means no usable code exists — never that half a program was written.
         _fail(
             session,
             project,
             "animation render",
-            ValueError(f"Scene {scene.order_index + 1} has no valid animation code"),
+            ValueError(
+                f"Scene {scene.order_index + 1}: no complete animation program was "
+                "returned. Retry the scene, or shorten its narration if it keeps failing."
+            ),
         )
         return False
 
@@ -2217,10 +2227,9 @@ def _write_metadata(
     meta.setdefault("title", project.title)
     meta.setdefault("description", "")
     meta.setdefault("hashtags", [])
-    meta.setdefault(
-        "suggested_caption",
-        f"{meta.get('title', project.title)} {' '.join(meta.get('hashtags', []))}".strip(),
-    )
+    # One description serves both platforms; the per-platform assembly (hashtag
+    # line, length limits) happens at publish time in routers/projects.py.
+    meta.pop("suggested_caption", None)
     if music_track:
         attribution = _music_attribution(music_track)
         description = str(meta.get("description", "") or "").strip()

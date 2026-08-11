@@ -19,7 +19,10 @@ from typing import Any
 
 __all__ = ["ANIMATION_OBJECT_SCHEMA", "catalog_for_prompt", "normalize_spec", "MAX_CODE_CHARS"]
 
-MAX_CODE_CHARS = 24000
+# Well above what an authoring call can produce, so this is a sanity bound, not
+# a working limit: code that exceeds it is REJECTED rather than cut down, since
+# a program chopped mid-statement is exactly the failure this guards against.
+MAX_CODE_CHARS = 60000
 
 
 def catalog_for_prompt(latex_available: bool = False) -> str:
@@ -56,6 +59,10 @@ Rules for the code (IMPORTANT):
 - {latex_note}
 - No file, network, OS, or system access. Pure Manim + Python math only. Do not
   call config.* or self.interactive_embed(). Keep total submobjects reasonable.
+- The program must be COMPLETE: the last line has to be a finished statement,
+  and every name must be defined before it is used. Write the animation the
+  scene deserves — there is no length limit, and running long is not a reason to
+  drop or simplify a beat.
 
 Sync to the narration (this is what makes it feel authored to the voice):
 - The clip MUST last `DURATION` seconds (a global float — the scene's spoken
@@ -97,6 +104,22 @@ self.play_at(self.cue("climbs to sixteen"), FadeIn(answer, shift=UP * 0.3), run_
 Note how the four phrases appear in the narration in exactly that order, each
 copied word for word.
 
+Show the arithmetic, not just the answer:
+- When the narration works through numbers, the diagram must perform the
+  calculation on screen, step by step, in the order it is spoken. Write the
+  formula with the real values substituted in, then transform it into the
+  intermediate result, then into the next one, and only then into the final
+  figure (`ReplacementTransform` / `TransformMatchingShapes` between the steps,
+  or a `ValueTracker` counting a running total).
+- Never draw a result the animation did not derive: if the voice says an amount
+  grows over thirty years, the frame must show the growth being computed (the
+  factor, the running balance, the subtraction that isolates the interest), not
+  a lone number appearing at the end.
+- Keep every number you draw consistent with the narration and arithmetically
+  correct. Compute intermediate values in Python (e.g.
+  `total = 200 * ((1 + r) ** n)`) and format them into the label instead of
+  typing a figure by hand, so the drawn value cannot drift from the real one.
+
 Prefer an animation whenever the frame is a diagram, graph, equation, formula,
 labeled figure, number line, table, counter, or a clean text-plus-equation-plus-
 shapes card (summary / recap / definition / worked-example / check cards) — Manim
@@ -134,8 +157,10 @@ ANIMATION_OBJECT_SCHEMA: dict[str, Any] = {
 def normalize_spec(raw: Any) -> dict | None:
     """Clean an animation spec (from the LLM or a user edit) or return None.
 
-    Requires a non-empty ``code`` string; returns ``{code, title}`` so callers
-    can treat a spec without code as "no animation yet".
+    Requires a non-empty ``code`` string of at most ``MAX_CODE_CHARS``; returns
+    ``{code, title}`` so callers can treat a spec without code as "no animation
+    yet". Over-long code is rejected outright — trimming it to the limit would
+    hand the renderer a program ending mid-statement.
     """
     if not isinstance(raw, dict):
         return None
@@ -144,6 +169,6 @@ def normalize_spec(raw: Any) -> dict | None:
         return None
     code = code.strip()
     if len(code) > MAX_CODE_CHARS:
-        code = code[:MAX_CODE_CHARS]
+        return None
     title = raw.get("title")
     return {"code": code, "title": str(title).strip() if isinstance(title, str) else ""}

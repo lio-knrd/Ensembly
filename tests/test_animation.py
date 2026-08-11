@@ -2,6 +2,7 @@ import unittest
 
 from backend.adapters.animation import _construct_body
 from backend.animation import normalize_spec, phrase_time
+from backend.animation.catalog import MAX_CODE_CHARS
 
 
 class PhraseTimeTests(unittest.TestCase):
@@ -36,9 +37,11 @@ class NormalizeSpecTests(unittest.TestCase):
         self.assertIsNone(normalize_spec({"title": "no code"}))
         self.assertIsNone(normalize_spec("not a dict"))
 
-    def test_code_is_length_capped(self):
-        spec = normalize_spec({"code": "x" * 50000})
-        self.assertLessEqual(len(spec["code"]), 24000)
+    def test_over_long_code_is_rejected(self):
+        # Trimming to the cap would hand the renderer a program cut off
+        # mid-statement — the exact failure the length guard exists to prevent.
+        self.assertIsNone(normalize_spec({"code": "x" * (MAX_CODE_CHARS + 1)}))
+        self.assertIsNotNone(normalize_spec({"code": "x" * MAX_CODE_CHARS}))
 
 
 class ConstructBodyTests(unittest.TestCase):

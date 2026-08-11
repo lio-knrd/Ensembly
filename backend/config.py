@@ -102,7 +102,10 @@ class Settings(BaseModel):
     # These pick which concrete adapter class runs — see backend/adapters.
     # ------------------------------------------------------------------ #
     # Script generation
-    anthropic_script_model: str = "claude-opus-4-8"
+    # Opus 5 thinks by default, and thinking shares the request's max_tokens with
+    # the answer — every call site below budgets for that rather than sizing
+    # max_tokens to the visible output alone.
+    anthropic_script_model: str = "claude-opus-5"
     openai_script_model: str = "gpt-4o"
     # Image generation (fal.ai model slug)
     fal_image_model: str = "fal-ai/flux/dev"

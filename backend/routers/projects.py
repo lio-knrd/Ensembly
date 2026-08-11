@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,6 +24,7 @@ from ..models import (
     Character,
     CharacterForm,
     ContentPreset,
+    EditorialItem,
     PlatformPreset,
     Project,
     ProjectCharacter,
@@ -41,6 +43,7 @@ from ..schemas import (
     ProjectSubtitlesUpdate,
     SceneAssetSelect,
     SceneUpdate,
+    ScriptRegenerate,
     TikTokPublishIn,
     TitleCardGenerate,
     TitleCardSelect,
@@ -284,6 +287,13 @@ def delete_project(project_id: str, session: Session = Depends(get_session)):
         raise HTTPException(404, "Project not found")
     folder_path = project.folder_path
     pipeline.cancel_project(project_id)
+    # An editorial item is a planning record, not a disposable child of the
+    # project. Keep it in the Idea Log and return it to the planned queue.
+    for item in session.exec(select(EditorialItem).where(EditorialItem.project_id == project_id)):
+        item.project_id = None
+        item.status = "planned"
+        item.updated_at = datetime.now(timezone.utc)
+        session.add(item)
     for s in session.exec(select(Scene).where(Scene.project_id == project_id)):
         session.delete(s)
     for link in session.exec(select(ProjectCharacter).where(ProjectCharacter.project_id == project_id)):
@@ -308,8 +318,18 @@ def _delete_project_folder(folder_path: str | None) -> None:
 
 # --- Pipeline controls ---
 @router.post("/{project_id}/generate-script")
-def regen_script(project_id: str, session: Session = Depends(get_session)):
-    _require(session, project_id)
+def regen_script(
+    project_id: str,
+    body: ScriptRegenerate | None = None,
+    session: Session = Depends(get_session),
+):
+    project = _require(session, project_id)
+    # Omitting revision_notes keeps whatever is stored, so the plain "Generate
+    # script" button never wipes notes the creator saved earlier.
+    if body is not None and body.revision_notes is not None:
+        project.revision_notes = body.revision_notes.strip()
+        session.add(project)
+        session.commit()
     pipeline.submit(pipeline.generate_script, project_id)
     return {"ok": True}
 
@@ -389,7 +409,6 @@ def tiktok_publish_target(project_id: str, session: Session = Depends(get_sessio
         if preset and preset.tiktok_account_id
         else None
     )
-    metadata = project_metadata(project.folder_path)
     video = _final_video_path(project)
     return {
         "configured": tiktok_service.is_configured(),
@@ -406,8 +425,9 @@ def tiktok_publish_target(project_id: str, session: Session = Depends(get_sessio
         ),
         "video_ready": bool(video),
         "video_bytes": video.stat().st_size if video else 0,
-        "suggested_caption": metadata.get("suggested_caption", "") or project.title,
+        "suggested_caption": _tiktok_caption(project),
         "privacy_levels": list(tiktok_service.PRIVACY_LEVELS),
+        "max_caption_chars": tiktok_service.MAX_CAPTION_CHARS,
     }
 
 
@@ -424,8 +444,7 @@ def publish_to_tiktok(
         raise HTTPException(400, "This project has no finished video to publish yet.")
     account = _publish_account(session, project)
     token = ensure_tiktok_token(session, account)
-    metadata = project_metadata(project.folder_path)
-    caption = (body.caption or metadata.get("suggested_caption") or project.title).strip()
+    caption = (body.caption or _tiktok_caption(project)).strip()
     try:
         if body.mode == "draft":
             # The caption travels with the creator, not the API: TikTok's draft
@@ -489,12 +508,16 @@ def _youtube_publish_account(session: Session, project: Project) -> YouTubeAccou
     return account
 
 
-def _youtube_defaults(project: Project) -> dict:
-    """Title/description/tags for this project, in YouTube's shape.
+def _publish_text(project: Project) -> dict:
+    """The one description both platforms publish, plus the pieces around it.
 
-    TikTok gets one caption blob; YouTube wants the three apart, so the
-    hashtags are appended to the description (where YouTube surfaces the first
-    few above the title) *and* kept as tags.
+    There is a single ``description`` in the script metadata and both platforms
+    use it verbatim, so the same video never goes out with two different texts.
+    The hashtags are appended to it (YouTube surfaces the first few above the
+    title, TikTok wants them inline) and kept separately for YouTube's tags.
+
+    Only the title is genuinely platform-specific: YouTube has a title field,
+    TikTok has one caption blob and no title at all.
     """
     metadata = project_metadata(project.folder_path)
     hashtags = [str(tag) for tag in (metadata.get("hashtags") or [])]
@@ -507,6 +530,13 @@ def _youtube_defaults(project: Project) -> dict:
         "description": description,
         "tags": hashtags,
     }
+
+
+def _tiktok_caption(project: Project) -> str:
+    """The TikTok caption: the shared description, trimmed to TikTok's limit."""
+    text = _publish_text(project)
+    caption = text["description"] or text["title"] or project.title
+    return caption.strip()[: tiktok_service.MAX_CAPTION_CHARS]
 
 
 def _title_card_file(project: Project) -> Path | None:
@@ -531,7 +561,7 @@ def youtube_publish_target(project_id: str, session: Session = Depends(get_sessi
         else None
     )
     video = _final_video_path(project)
-    defaults = _youtube_defaults(project)
+    defaults = _publish_text(project)
     return {
         "configured": youtube_service.is_configured(),
         "group": {"id": preset.id, "name": preset.name} if preset else None,
@@ -571,7 +601,7 @@ def publish_to_youtube(
         raise HTTPException(400, "This project has no finished video to publish yet.")
     account = _youtube_publish_account(session, project)
     token = ensure_youtube_token(session, account)
-    defaults = _youtube_defaults(project)
+    defaults = _publish_text(project)
     snippet = youtube_service.build_snippet(
         title=body.title if body.title is not None else defaults["title"],
         description=(

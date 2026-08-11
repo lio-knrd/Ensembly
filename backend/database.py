@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import text
+from sqlalchemy import MetaData, event, text
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlmodel import Session, SQLModel, create_engine
 
 from .config import settings
@@ -47,6 +48,7 @@ _ADDED_COLUMNS = [
     ("projects", "subtitles_enabled", "BOOLEAN DEFAULT 1"),
     ("projects", "subtitle_position", "REAL DEFAULT 0.128"),
     ("projects", "title_is_custom", "BOOLEAN DEFAULT 0"),
+    ("projects", "revision_notes", "TEXT DEFAULT ''"),
     ("projects", "title_card_path", "TEXT DEFAULT NULL"),
     ("projects", "title_card_source_path", "TEXT DEFAULT NULL"),
     ("projects", "title_card_kicker", "TEXT DEFAULT ''"),
@@ -67,6 +69,33 @@ engine = create_engine(
 )
 
 
+@event.listens_for(engine, "connect")
+def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+    """SQLite does not enforce declared foreign keys unless every connection opts in."""
+    dbapi_connection.execute("PRAGMA foreign_keys = ON")
+
+
+# All of these links are optional. Deleting the record on the right must retain
+# the record on the left and clear only the now-invalid reference. Non-nullable
+# relationships intentionally keep SQLite's default NO ACTION policy; their
+# delete behavior remains explicit application logic until a separate decision
+# is made for each one.
+_SET_NULL_FOREIGN_KEYS = {
+    ("characters", "content_preset_id", "content_presets", "id"),
+    ("content_presets", "tiktok_account_id", "tiktok_accounts", "id"),
+    ("content_presets", "youtube_account_id", "youtube_accounts", "id"),
+    ("ideas", "plan_id", "editorial_plans", "id"),
+    ("editorial_items", "project_id", "projects", "id"),
+    ("editorial_plans", "parent_plan_id", "editorial_plans", "id"),
+    ("editorial_plans", "platform_preset_id", "platform_presets", "id"),
+    ("editorial_plans", "content_preset_id", "content_presets", "id"),
+    ("projects", "platform_preset_id", "platform_presets", "id"),
+    ("projects", "content_preset_id", "content_presets", "id"),
+    ("projects", "music_track_id", "music_tracks", "id"),
+}
+_FK_POLICY_TABLES = tuple(sorted({table for table, _, _, _ in _SET_NULL_FOREIGN_KEYS}))
+
+
 def init_db() -> None:
     settings.ensure_dirs()
     # Import models so their tables register on SQLModel.metadata.
@@ -74,6 +103,8 @@ def init_db() -> None:
 
     SQLModel.metadata.create_all(engine)
     _run_migrations()
+    _repair_nullable_orphans()
+    _apply_foreign_key_policy()
     _rename_legacy_values()
 
 
@@ -105,6 +136,101 @@ def _run_migrations() -> None:
                     conn.execute(text("UPDATE projects SET title_is_custom = 1"))
                 if table == "characters" and column == "content_preset_id":
                     _backfill_character_groups(conn)
+
+
+def _repair_nullable_orphans() -> None:
+    """Restore the only nullable relationship with domain-state recovery.
+
+    The project board historically allowed a project to be deleted while its
+    editorial item retained the project's id. An item is still valid without a
+    project, so it returns to the planned queue rather than being deleted.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE editorial_items "
+                "SET project_id = NULL, status = 'planned', updated_at = CURRENT_TIMESTAMP "
+                "WHERE project_id IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id = editorial_items.project_id)"
+            )
+        )
+
+
+def _apply_foreign_key_policy() -> None:
+    """Upgrade legacy SQLite tables to the model's nullable-link policy.
+
+    SQLite cannot add or alter a foreign-key constraint in place. Legacy
+    additive migrations therefore need a one-time table rebuild, preserving all
+    columns and rows while recreating the tables with the current constraints.
+    """
+    with engine.connect() as conn:
+        if not _foreign_key_policy_needs_upgrade(conn):
+            return
+
+        # PRAGMA changes must happen outside a transaction. The tables are
+        # copied before any originals are dropped, and all original names are
+        # restored before foreign-key checks are turned back on.
+        conn.commit()
+        raw_connection = conn.connection.driver_connection
+        raw_connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with conn.begin():
+                temporary_tables: dict[str, str] = {}
+                # Keep original-name table definitions in this metadata solely
+                # so cloned foreign keys can resolve their parent names. Only
+                # the temporary tables below are emitted as DDL.
+                temporary_metadata = MetaData()
+                for table in SQLModel.metadata.tables.values():
+                    table.to_metadata(temporary_metadata)
+                for table_name in _FK_POLICY_TABLES:
+                    source_table = SQLModel.metadata.tables[table_name]
+                    existing_columns = {
+                        row[1]
+                        for row in conn.execute(text(f'PRAGMA table_info("{table_name}")'))
+                    }
+                    model_columns = set(source_table.columns.keys())
+                    if existing_columns != model_columns:
+                        raise RuntimeError(
+                            f"Cannot safely rebuild {table_name}: database columns do not match the model"
+                        )
+
+                    temporary_name = f"__fk_policy_{table_name}"
+                    temporary_table = source_table.to_metadata(
+                        temporary_metadata, name=temporary_name
+                    )
+                    conn.execute(CreateTable(temporary_table))
+                    columns = ", ".join(f'"{column}"' for column in source_table.columns.keys())
+                    conn.execute(
+                        text(
+                            f'INSERT INTO "{temporary_name}" ({columns}) '
+                            f'SELECT {columns} FROM "{table_name}"'
+                        )
+                    )
+                    temporary_tables[table_name] = temporary_name
+
+                for table_name in _FK_POLICY_TABLES:
+                    conn.execute(text(f'DROP TABLE "{table_name}"'))
+                for table_name, temporary_name in temporary_tables.items():
+                    conn.execute(text(f'ALTER TABLE "{temporary_name}" RENAME TO "{table_name}"'))
+                for table_name in _FK_POLICY_TABLES:
+                    for index in SQLModel.metadata.tables[table_name].indexes:
+                        conn.execute(CreateIndex(index))
+        finally:
+            raw_connection.execute("PRAGMA foreign_keys = ON")
+
+
+def _foreign_key_policy_needs_upgrade(conn) -> bool:
+    for table_name, column, parent_table, parent_column in _SET_NULL_FOREIGN_KEYS:
+        foreign_keys = conn.execute(text(f'PRAGMA foreign_key_list("{table_name}")')).mappings()
+        if not any(
+            fk["from"] == column
+            and fk["table"] == parent_table
+            and fk["to"] == parent_column
+            and fk["on_delete"].upper() == "SET NULL"
+            for fk in foreign_keys
+        ):
+            return True
+    return False
 
 
 def _backfill_character_groups(conn) -> None:

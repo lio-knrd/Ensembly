@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 
 from ..adapters.llm import ai_image_style_prompt
 from ..database import get_session
-from ..models import Character, ContentPreset, PlatformPreset
+from ..models import Character, ContentPreset, EditorialPlan, PlatformPreset, Project
 from ..schemas import ContentPresetIn, PlatformPresetIn, StyleSuggestionIn
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
@@ -51,6 +51,12 @@ def delete_platform(preset_id: str, session: Session = Depends(get_session)):
     preset = session.get(PlatformPreset, preset_id)
     if not preset:
         raise HTTPException(404, "Preset not found")
+    for project in session.exec(select(Project).where(Project.platform_preset_id == preset_id)):
+        project.platform_preset_id = None
+        session.add(project)
+    for plan in session.exec(select(EditorialPlan).where(EditorialPlan.platform_preset_id == preset_id)):
+        plan.platform_preset_id = None
+        session.add(plan)
     session.delete(preset)
     session.commit()
 
@@ -106,6 +112,12 @@ def delete_content(preset_id: str, session: Session = Depends(get_session)):
     for char in session.exec(select(Character).where(Character.content_preset_id == preset_id)):
         char.content_preset_id = None
         session.add(char)
+    for project in session.exec(select(Project).where(Project.content_preset_id == preset_id)):
+        project.content_preset_id = None
+        session.add(project)
+    for plan in session.exec(select(EditorialPlan).where(EditorialPlan.content_preset_id == preset_id)):
+        plan.content_preset_id = None
+        session.add(plan)
     session.delete(preset)
     session.commit()
 

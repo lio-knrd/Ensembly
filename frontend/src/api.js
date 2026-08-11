@@ -36,7 +36,12 @@ export const api = {
     req("/api/projects/split", { method: "POST", body: JSON.stringify(body) }),
   getProject: (id) => req(`/api/projects/${id}`),
   deleteProject: (id) => req(`/api/projects/${id}`, { method: "DELETE" }),
-  regenScript: (id) => req(`/api/projects/${id}/generate-script`, { method: "POST" }),
+  // body may carry { revision_notes }; omitting it keeps the stored notes.
+  regenScript: (id, body) =>
+    req(`/api/projects/${id}/generate-script`, {
+      method: "POST",
+      body: JSON.stringify(body || {}),
+    }),
   approveScript: (id) => req(`/api/projects/${id}/approve-script`, { method: "POST" }),
   getCast: (id) => req(`/api/projects/${id}/cast`),
   generateCastSheet: (id, body) =>

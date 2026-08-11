@@ -44,6 +44,9 @@ MAX_CHUNK = 64 * MB
 MAX_VIDEO_BYTES = 4 * 1024 * MB
 MAX_CHUNKS = 1000
 
+# TikTok's single caption field ("title" in the Direct Post payload).
+MAX_CAPTION_CHARS = 2200
+
 PRIVACY_LEVELS = (
     "PUBLIC_TO_EVERYONE",
     "MUTUAL_FOLLOW_FRIENDS",
@@ -229,7 +232,7 @@ def init_direct_post(
     chunk_size, total_chunks = chunk_plan(video_bytes)
     body = {
         "post_info": {
-            "title": title[:2200],
+            "title": title[:MAX_CAPTION_CHARS],
             "privacy_level": privacy_level,
             "disable_comment": disable_comment,
             "disable_duet": disable_duet,

@@ -60,7 +60,10 @@ For each scene you must provide:
 Pace the total narration to fit the target duration the user provides \
 (assume roughly 2.5 spoken words per second). Also produce social metadata for \
 the finished video: a title, a description, and platform-appropriate hashtags. \
-Create thumbnail copy with two distinct levels: cover_kicker is a short, \
+Write one description that works as-is on every platform — it is used verbatim \
+as the YouTube description and as the TikTok caption, so do not write it for one \
+platform in particular and do not put the hashtags inside it (they are appended \
+automatically). Create thumbnail copy with two distinct levels: cover_kicker is a short, \
 intriguing context line of 2-5 words, while cover_title is the bold 1-3 word \
 subject or name that should dominate the cover. Do not put "Part 1", "Part 2", \
 or similar series numbering in either field; the pipeline adds that separately.
@@ -108,7 +111,35 @@ def _animation_guidance(latex_available: bool = False) -> str:
         "narration. Consecutive animation scenes (with no still or video scene "
         "between them) are automatically combined into ONE continuous animation with "
         "one continuous narration and one voice take, so just write each beat "
-        "naturally and let the pipeline join them."
+        "naturally and let the pipeline join them.\n\n"
+        "Numbers must be worked out, never just asserted. If the video uses a "
+        "concrete numeric example, the narration must walk through the actual "
+        "calculation in steps the viewer can follow: state the inputs, say which "
+        "operation is applied to them, and speak the intermediate results on the way "
+        "to the answer. Do not jump from the setup straight to a final figure, and "
+        "do not present a number the script never derived. Every figure you speak "
+        "must be arithmetically correct and reachable from the numbers spoken before "
+        "it, so a viewer with a calculator gets the same result. Because the diagram "
+        "is written from the narration, a calculation the narration skips cannot be "
+        "drawn either."
+    )
+
+
+def _revision_notes_block(revision_notes: str) -> str:
+    """The creator's correction notes for this project, as its own section.
+
+    Placed last so it is the final thing the model reads, and worded as an
+    override: these notes exist precisely because an earlier attempt got
+    something wrong, so they outrank the preset's general guidance.
+    """
+    return (
+        "## Correction notes from the creator (highest priority)\n"
+        "An earlier script for this project was rejected. Treat the notes below as "
+        "binding instructions for this rewrite: fix every problem they name, and "
+        "where they conflict with the general platform or content guidance above, "
+        "follow the notes. Do not mention the notes, the rewrite, or any earlier "
+        "version in the narration.\n"
+        f"{revision_notes.strip()}"
     )
 
 
@@ -119,6 +150,7 @@ def build_script_prompt(
     target_duration_seconds: int,
     enable_animations: bool = False,
     latex_available: bool = False,
+    revision_notes: str = "",
 ) -> str:
     """Assemble the full user-facing instruction: platform + content + project.
 
@@ -126,6 +158,8 @@ def build_script_prompt(
     this function combines Layer 2 (platform), Layer 3 (content), and the
     project's one-line idea + target duration into the user turn. When the
     content preset enables animations, the animation template catalog is appended.
+    ``revision_notes`` is the project's creator feedback (empty for a first
+    generation), appended last as a binding correction section.
     """
     parts = [
         "## Platform / delivery format (how to package this)",
@@ -156,6 +190,8 @@ def build_script_prompt(
         "object, place, artifact, costume detail, symbol, vehicle, or environment. "
         "Use an empty array for ordinary scene-to-scene flow or vague similarity.",
     ]
+    if revision_notes.strip():
+        parts += ["", _revision_notes_block(revision_notes)]
     return "\n".join(parts)
 
 
@@ -212,13 +248,12 @@ SCRIPT_JSON_SCHEMA: dict = {
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "hashtags": {"type": "array", "items": {"type": "string"}},
-                "suggested_caption": {"type": "string"},
                 "hook_text": {"type": "string"},
                 "cover_kicker": {"type": "string"},
                 "cover_title": {"type": "string"},
             },
             "required": [
-                "title", "description", "hashtags", "suggested_caption",
+                "title", "description", "hashtags",
                 "cover_kicker", "cover_title"
             ],
             "additionalProperties": False,

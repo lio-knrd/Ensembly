@@ -13,6 +13,16 @@ import httpx
 from ..config import settings
 from .base import GeneratedScene, GeneratedScript, ScriptGenerator
 
+# How hard the model should think, per task. Opus 5 thinks on every request and
+# bills that thinking as output, so leaving every call at the API default of
+# "high" pays deep reasoning for naming a character's clothes. The ladder below
+# sizes it to the job and deliberately stops at "high": xhigh and max buy
+# diminishing returns here, and nothing in this pipeline is worth them.
+_EFFORT_AUTHORING = "high"    # writing a script or a Manim program
+_EFFORT_PLANNING = "medium"   # judgement calls over a topic: scope, series split
+_EFFORT_PHRASING = "low"      # a sentence or two of description or house style
+# Only the Anthropic calls carry it; the OpenAI paths have no such parameter.
+
 
 def _extract_json(text: str) -> dict:
     """Parse a JSON object out of an LLM text response.
@@ -101,13 +111,20 @@ class AnthropicScriptGenerator(ScriptGenerator):
         import anthropic
 
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        response = client.messages.create(
+        # Streamed: a full scene list plus the model's thinking needs a budget
+        # past what a non-streaming request may hold open, and a script cut off
+        # mid-JSON fails the whole generation rather than degrading.
+        with client.messages.stream(
             model=settings.anthropic_script_model,
-            max_tokens=16000,
+            max_tokens=64000,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
-            output_config={"format": {"type": "json_schema", "schema": schema}},
-        )
+            output_config={
+                "format": {"type": "json_schema", "schema": schema},
+                "effort": _EFFORT_AUTHORING,
+            },
+        ) as stream:
+            response = stream.get_final_message()
         text = next((b.text for b in response.content if b.type == "text"), "")
         return _coerce_script(_extract_json(text))
 
@@ -198,7 +215,6 @@ class OfflineScriptGenerator(ScriptGenerator):
                 f"(Generated offline — add API keys in .env for real script generation.)"
             ),
             "hashtags": ["#story", "#shorts", "#" + "".join(topic.title().split())[:24]],
-            "suggested_caption": f"The Story of {topic.title()} — you won't believe how it ends. #story #shorts",
             "hook_text": f"What really happened with {topic}?",
             "cover_kicker": "THE UNTOLD STORY",
             "cover_title": textwrap.shorten(topic.title(), width=28, placeholder=""),
@@ -292,9 +308,12 @@ Return only the structured assessment."""
             client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
             response = client.messages.create(
                 model=settings.anthropic_script_model,
-                max_tokens=1400,
+                max_tokens=16000,
                 messages=[{"role": "user", "content": instruction}],
-                output_config={"format": {"type": "json_schema", "schema": SCOPE_ANALYSIS_SCHEMA}},
+                output_config={
+                    "format": {"type": "json_schema", "schema": SCOPE_ANALYSIS_SCHEMA},
+                    "effort": _EFFORT_PLANNING,
+                },
             )
             text = next((b.text for b in response.content if b.type == "text"), "")
             return _extract_json(text)
@@ -441,9 +460,12 @@ Return only the structured response."""
             client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
             response = client.messages.create(
                 model=settings.anthropic_script_model,
-                max_tokens=4000,
+                max_tokens=16000,
                 messages=[{"role": "user", "content": prompt}],
-                output_config={"format": {"type": "json_schema", "schema": EDITORIAL_SUGGESTIONS_SCHEMA}},
+                output_config={
+                    "format": {"type": "json_schema", "schema": EDITORIAL_SUGGESTIONS_SCHEMA},
+                    "effort": _EFFORT_PLANNING,
+                },
             )
             text = next((b.text for b in response.content if b.type == "text"), "")
             return _normalize_editorial_suggestions(_extract_json(text), count)
@@ -525,11 +547,145 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
+# max_tokens is a ceiling, not a target: the model stops when the program is
+# done, exactly like a chat reply ends when the answer ends. The old 4000 was
+# simply too low a ceiling for a 35-second scene, so answers were cut off
+# mid-statement — and a cut-off program often still parses (a dangling `infl1`
+# is a valid expression), so it reached the renderer and died as a NameError.
+# Claude tops out at 128k output tokens, far beyond any construct body, which
+# effectively removes truncation here. Requests that large must stream: the SDK
+# refuses a non-streaming call it expects to outlive the connection.
+_ANTHROPIC_MAX_TOKENS = 128000
+# GPT-4o's output ceiling is much lower, so that provider leans on the
+# continuation loop below rather than on a single large budget.
+_OPENAI_MAX_TOKENS = 16000
+# Resumes allowed before giving up. A construct body that is still unfinished
+# after this many is not going to converge.
+_MAX_CONTINUATIONS = 4
+
+# Claude rejects a request whose LAST message is an assistant turn, so a partial
+# answer cannot simply be handed back to be extended. It is instead sandwiched
+# between the original ask and this note, which is the supported way to resume.
+_CONTINUE_NOTE = """\
+Your previous message stopped at the output limit, mid-program. Continue the \
+construct body from exactly where it stopped. Do not repeat any code you already \
+wrote, do not restate the whole program, do not open a markdown fence, and do not \
+add commentary. If your last line was left unfinished, complete that line first."""
+
+_RETRY_NOTE = """
+
+IMPORTANT — your previous answer was unusable: it did not parse as valid Python, \
+or it never reached the end of the program. Write the animation again as one \
+complete, syntactically valid construct body. Every statement must be finished \
+and every name defined before it is used."""
+
+
+def _compiles(code: str) -> bool:
+    """Does this construct body parse as Python at all?
+
+    Cheap guard against a mangled or half-written answer reaching Manim, where
+    the same problem surfaces as an opaque traceback three subprocesses deep.
+    """
+    try:
+        compile(code, "<animation>", "exec")
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _complete_code(messages: list[dict]) -> tuple[str | None, bool]:
+    """One code completion against the active provider.
+
+    Returns ``(text, truncated)``, where ``truncated`` means the model hit the
+    output cap and the answer therefore stops mid-program. ``(None, False)``
+    means no provider is configured. The text is returned raw — fences are
+    stripped once, after any continuations have been joined.
+    """
+    if settings.anthropic_api_key and settings.default_llm_provider != "openai":
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        with client.messages.stream(
+            model=settings.anthropic_script_model,
+            max_tokens=_ANTHROPIC_MAX_TOKENS,
+            messages=messages,
+            # Layout, cue ordering and on-screen arithmetic all have to be right
+            # at once — this is the hardest call in the pipeline.
+            output_config={"effort": _EFFORT_AUTHORING},
+        ) as stream:
+            resp = stream.get_final_message()
+        text = next((b.text for b in resp.content if b.type == "text"), "")
+        truncated = getattr(resp, "stop_reason", "") == "max_tokens"
+        return text or None, truncated
+    if settings.openai_api_key:
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            json={
+                "model": settings.openai_script_model,
+                "messages": messages,
+                "max_tokens": _OPENAI_MAX_TOKENS,
+            },
+            timeout=180,
+        )
+        resp.raise_for_status()
+        choice = resp.json()["choices"][0]
+        return choice["message"]["content"] or None, choice.get("finish_reason") == "length"
+    return None, False
+
+
+def _complete_until_done(instruction: str) -> str | None:
+    """Keep the model going until it ends the program on its own.
+
+    Hitting the output cap is not treated as an answer any more: the partial is
+    kept and the model is asked to carry on from where it stopped, so length
+    stops being a failure mode instead of merely a bigger budget. Returns None
+    when no provider is configured, a call fails, or the program is still
+    unfinished after ``_MAX_CONTINUATIONS`` resumes.
+    """
+    messages: list[dict] = [{"role": "user", "content": instruction}]
+    parts: list[str] = []
+    for _ in range(_MAX_CONTINUATIONS + 1):
+        try:
+            text, truncated = _complete_code(messages)
+        except Exception:  # noqa: BLE001 — authoring stays best-effort
+            return None
+        if text is None:
+            return None
+        parts.append(text)
+        if not truncated:
+            return _strip_code_fences("".join(parts)) or None
+        messages = [
+            {"role": "user", "content": instruction},
+            {"role": "assistant", "content": "".join(parts)},
+            {"role": "user", "content": _CONTINUE_NOTE},
+        ]
+    return None
+
+
+def _authored_code(instruction: str) -> str | None:
+    """Complete, syntactically valid construct-body code, or None.
+
+    Runs the completion (resuming as often as the program needs) and retries
+    once when the result is still unfinished or unparseable. Returning None makes
+    the caller fail loudly, which is strictly better than rendering a half
+    program.
+    """
+    for prompt in (instruction, instruction + _RETRY_NOTE):
+        code = _complete_until_done(prompt)
+        # Only an unusable answer earns the second, shorter-prompt attempt. With
+        # no provider configured the retry costs nothing — it makes no call.
+        if code and _compiles(code):
+            return code
+    return None
+
+
 def author_manim_code(
     narration: str,
     duration: float,
     latex_available: bool,
     style_prompt: str = "",
+    revision_notes: str = "",
 ) -> str | None:
     """Author Manim construct-body code for one animation scene, AFTER its audio.
 
@@ -546,6 +702,10 @@ def author_manim_code(
     a whole spectrum of colors) down to its own, but never override the hard
     constraints above it. Empty for groups that have not set one, in which case
     the prompt is byte-identical to before.
+
+    ``revision_notes`` is the project's creator feedback (``Project.revision_notes``).
+    It lands after the house style because it is a correction of what this very
+    project got wrong last time, and is empty for projects without notes.
     """
     from ..animation.catalog import catalog_for_prompt
 
@@ -556,6 +716,14 @@ def author_manim_code(
             "any conflicting stylistic suggestion in the rules above (it does not "
             "override the canvas, sync, or safety constraints):\n"
             f"{style_prompt.strip()}\n"
+        )
+    if revision_notes.strip():
+        style_block += (
+            "\nCorrection notes from the creator for this project — an earlier "
+            "version was rejected. Apply them to this diagram wherever they touch "
+            "what it shows (they do not override the canvas, sync, or safety "
+            "constraints):\n"
+            f"{revision_notes.strip()}\n"
         )
 
     instruction = f"""Write Manim Community code — the BODY of construct(self) — for a short \
@@ -570,34 +738,7 @@ Scene narration (spoken over this animation — copy exact phrases into self.cue
 Target duration: {duration:.1f} seconds (pace the animation to fill it).
 
 Return only the construct-body code."""
-    try:
-        if settings.anthropic_api_key and settings.default_llm_provider != "openai":
-            import anthropic
-
-            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-            resp = client.messages.create(
-                model=settings.anthropic_script_model,
-                max_tokens=4000,
-                messages=[{"role": "user", "content": instruction}],
-            )
-            text = next((b.text for b in resp.content if b.type == "text"), "")
-            return _strip_code_fences(text) or None
-        if settings.openai_api_key:
-            resp = httpx.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                json={
-                    "model": settings.openai_script_model,
-                    "messages": [{"role": "user", "content": instruction}],
-                    "max_tokens": 4000,
-                },
-                timeout=120,
-            )
-            resp.raise_for_status()
-            return _strip_code_fences(resp.json()["choices"][0]["message"]["content"]) or None
-    except Exception:  # noqa: BLE001 — authoring is best-effort; render fails loud if empty
-        pass
-    return None
+    return _authored_code(instruction)
 
 
 def repair_manim_code(
@@ -631,34 +772,7 @@ Target duration: {duration:.1f} seconds
 {error}
 
 Return only the corrected construct-body code."""
-    try:
-        if settings.anthropic_api_key and settings.default_llm_provider != "openai":
-            import anthropic
-
-            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-            resp = client.messages.create(
-                model=settings.anthropic_script_model,
-                max_tokens=4000,
-                messages=[{"role": "user", "content": instruction}],
-            )
-            text = next((b.text for b in resp.content if b.type == "text"), "")
-            return _strip_code_fences(text) or None
-        if settings.openai_api_key:
-            resp = httpx.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                json={
-                    "model": settings.openai_script_model,
-                    "messages": [{"role": "user", "content": instruction}],
-                    "max_tokens": 4000,
-                },
-                timeout=120,
-            )
-            resp.raise_for_status()
-            return _strip_code_fences(resp.json()["choices"][0]["message"]["content"]) or None
-    except Exception:  # noqa: BLE001 — repair is best-effort
-        pass
-    return None
+    return _authored_code(instruction)
 
 
 def ai_character_description(name: str, topic: str, content_prompt: str) -> str:
@@ -680,8 +794,11 @@ def ai_character_description(name: str, topic: str, content_prompt: str) -> str:
             client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
             resp = client.messages.create(
                 model=settings.anthropic_script_model,
-                max_tokens=200,
+                # The description is one or two sentences; the budget is sized
+                # for the thinking that precedes it, not for the answer.
+                max_tokens=16000,
                 messages=[{"role": "user", "content": instruction}],
+                output_config={"effort": _EFFORT_PHRASING},
             )
             return next((b.text for b in resp.content if b.type == "text"), "").strip()
         if settings.openai_api_key:
@@ -728,8 +845,10 @@ def ai_image_style_prompt(content_prompt: str, current_style_prompt: str = "", g
             client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
             resp = client.messages.create(
                 model=settings.anthropic_script_model,
-                max_tokens=450,
+                # Short prose out, but thinking is billed against the same cap.
+                max_tokens=16000,
                 messages=[{"role": "user", "content": instruction}],
+                output_config={"effort": _EFFORT_PHRASING},
             )
             text = next((b.text for b in resp.content if b.type == "text"), "").strip()
             if text:

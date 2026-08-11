@@ -32,6 +32,13 @@ class ProjectSplitCreate(ProjectScopeAnalyze):
     start: bool = True
 
 
+class ScriptRegenerate(BaseModel):
+    # What the last script got wrong. Stored on the project so it also reaches
+    # the later animation-authoring stage, and stays editable across retries.
+    # None leaves the stored notes untouched; "" clears them.
+    revision_notes: Optional[str] = None
+
+
 class TitleCardGenerate(BaseModel):
     mode: Literal["reuse", "generate"] = "reuse"
     scene_id: Optional[str] = None

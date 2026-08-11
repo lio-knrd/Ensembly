@@ -16,6 +16,22 @@ from backend.adapters import llm
 from backend.models import ContentPreset, Project
 
 
+class _FakeStream:
+    """Stands in for the SDK's streaming context manager."""
+
+    def __init__(self, message):
+        self._message = message
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self._message
+
+
 class _FakeAnthropic:
     """Captures the instruction instead of calling the API."""
 
@@ -24,12 +40,12 @@ class _FakeAnthropic:
     def __init__(self, api_key=None):
         self.messages = self
 
-    def create(self, model=None, max_tokens=None, messages=None):
+    def stream(self, model=None, max_tokens=None, messages=None, output_config=None):
         _FakeAnthropic.captured.append(messages[0]["content"])
         block = mock.Mock()
         block.type = "text"
         block.text = "self.wait(1)"
-        return mock.Mock(content=[block])
+        return _FakeStream(mock.Mock(content=[block], stop_reason="end_turn"))
 
 
 def _author(style_prompt: str = "") -> str:

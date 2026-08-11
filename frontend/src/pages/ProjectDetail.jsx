@@ -363,6 +363,7 @@ function StageProgress({ stage }) {
 function StageBar({ project, scenes }) {
   const qc = useQueryClient();
   const id = project.id;
+  const [showRegen, setShowRegen] = useState(false);
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["project", id] });
     qc.invalidateQueries({ queryKey: ["projects"] });
@@ -372,7 +373,7 @@ function StageBar({ project, scenes }) {
   const approveScript = call(() => api.approveScript(id));
   const approveStoryboard = call(() => api.approveStoryboard(id));
   const approveClips = call(() => api.approveClips(id));
-  const regenScript = call(() => api.regenScript(id));
+  const regenScript = call((body) => api.regenScript(id, body));
   const stepBack = call(() => api.stepBack(id));
   const stepForward = call(() => api.stepForward(id));
   const retryFailedStep = call(() => api.retryFailedStep(id));
@@ -409,7 +410,11 @@ function StageBar({ project, scenes }) {
   } else if (project.stage === "SCRIPT_READY") {
     action = (
       <div className="row">
-        <button className="btn" onClick={() => regenScript.mutate()}>
+        <button
+          className="btn"
+          title="Rewrite the script, optionally with notes on what to fix"
+          onClick={() => setShowRegen(true)}
+        >
           <RefreshCw />
           Regenerate script
         </button>
@@ -511,7 +516,67 @@ function StageBar({ project, scenes }) {
         )}
         {action}
       </div>
+      {showRegen && (
+        <RegenerateScriptModal
+          project={project}
+          pending={regenScript.isPending}
+          onClose={() => setShowRegen(false)}
+          onSubmit={(notes) => {
+            regenScript.mutate({ revision_notes: notes });
+            setShowRegen(false);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// Regenerating is where a creator knows exactly what went wrong, so this is the
+// place to capture it. The notes are stored on the project, so they also reach
+// the later animation-authoring stage and survive further regenerates.
+function RegenerateScriptModal({ project, pending, onClose, onSubmit }) {
+  const [notes, setNotes] = useState(project.revision_notes || "");
+  const saved = (project.revision_notes || "").trim();
+
+  return (
+    <Modal title="Regenerate script" onClose={onClose}>
+      <p className="panel-sub" style={{ marginTop: 0 }}>
+        The script and all scenes are rewritten from scratch. Tell the writer what
+        was wrong, misleading, or missing last time, and it will be applied to the
+        new script and to the animations generated from it.
+      </p>
+      <div className="field">
+        <label>Notes for this rewrite (optional)</label>
+        <textarea
+          autoFocus
+          rows={6}
+          placeholder={
+            "e.g. Work every number out on screen: show 200 euro compounding year by " +
+            "year, then subtract the deposits to isolate the interest. Never state a " +
+            "result the script did not calculate."
+          }
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+        <span className="field-hint">
+          {saved
+            ? "Kept from the last rewrite. Edit or clear them; they stay with the project."
+            : "Stored with the project, so they also apply to later regenerations."}
+        </span>
+      </div>
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          className="btn primary"
+          disabled={pending}
+          onClick={() => onSubmit(notes)}
+        >
+          {pending ? "Starting..." : "Regenerate script"}
+        </button>
+      </div>
+    </Modal>
   );
 }
 
@@ -1143,12 +1208,6 @@ function FinalPanel({ project, metadata }) {
               </div>
             </div>
           )}
-          {metadata?.suggested_caption && (
-            <div className="field">
-              <label>Suggested caption</label>
-              <textarea readOnly value={metadata.suggested_caption} />
-            </div>
-          )}
           {videoUrl && (
             <a className="btn" href={videoUrl} download>
               <Download />
@@ -1231,13 +1290,19 @@ function TikTokPublish({ project }) {
             </span>
           </div>
           <div className="field">
-            <label>Caption</label>
-            <textarea value={caption} onChange={(e) => setCaption(e.target.value)} />
-            {mode === "draft" && (
-              <span className="style-assistant-note">
-                TikTok's draft flow asks for the caption in the app - copy this over there.
-              </span>
-            )}
+            <label>
+              Caption ({caption.length}/{target.max_caption_chars})
+            </label>
+            <textarea
+              value={caption}
+              maxLength={target.max_caption_chars}
+              onChange={(e) => setCaption(e.target.value)}
+            />
+            <span className="style-assistant-note">
+              {mode === "draft"
+                ? "The same text as the YouTube description. TikTok's draft flow asks for the caption in the app - copy this over there."
+                : "The same text as the YouTube description, hashtags included."}
+            </span>
           </div>
           {mode === "direct" && (
             <div className="field">
