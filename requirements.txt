@@ -28,3 +28,14 @@ anthropic==0.116.0
 # Requires Python 3.13-compatible Manim (0.19+). For typeset math (MathTex/Tex)
 # install a LaTeX distribution (e.g. MiKTeX); Text-based scenes work without it.
 manim>=0.19,<0.21
+
+# Depth estimation for 2.5D parallax over still panels
+# (backend/services/parallax.py). OPTIONAL, same contract as manim above: the
+# renderer checks parallax.available() and falls back to a flat camera move when
+# either the runtime or the weights are missing.
+#   pip install onnxruntime
+# Weights (Depth Anything V2 Small, ~99 MB) go in data/models/:
+#   https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx
+#   -> data/models/depth_anything_v2_small.onnx
+# onnxruntime-gpu can replace onnxruntime; parallax.py picks CUDA when present.
+onnxruntime; python_version >= "3.9"

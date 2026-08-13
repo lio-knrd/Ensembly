@@ -11,6 +11,15 @@ class GeneratedScene:
     narration_text: str
     image_prompt: str
     scene_type: str  # "still" | "video" | "animation"
+    # Motion only — what moves and how the camera moves. Sent to the video model
+    # instead of image_prompt, which describes a frozen frame. Empty for stills.
+    motion_prompt: str = ""
+    # Camera move for the shot. Drives the render-time move over a still, and
+    # rides along as a hint on video scenes. See models.CameraMove.
+    camera_move: str = "push_in"
+    # Extra layers over the camera move, both off by default. See models.
+    particles: str = "none"
+    transition: str = "cut"
     characters: list[dict] = field(default_factory=list)
     continuity_context: list[dict] = field(default_factory=list)
     # Present only for scene_type == "animation": {"code", "title"} — AI-authored

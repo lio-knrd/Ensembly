@@ -45,6 +45,13 @@ export default function ProjectDetail() {
   if (isLoading || !data) return <Loading full />;
   const { project, scenes, metadata, characters } = data;
   const visualStyle = project.visual_style_prompt || "";
+  const motionStyle = project.motion_style_prompt || "";
+  const clipInfo = {
+    elements: !!project.video_character_elements,
+    maxSeconds: project.max_clip_seconds || 0,
+    // Panels groups generate no video, so the scene cards must not offer it.
+    panelsMode: project.visual_mode === "panels",
+  };
 
   return (
     <>
@@ -109,6 +116,8 @@ export default function ProjectDetail() {
             scene={s}
             stage={project.stage}
             visualStyle={visualStyle}
+            motionStyle={motionStyle}
+            clipInfo={clipInfo}
             hasNextScene={index < scenes.length - 1}
           />
         ))}
@@ -1530,12 +1539,49 @@ function YouTubePublish({ project }) {
   );
 }
 
-function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
+const CAMERA_MOVES = [
+  ["push_in", "Push in"],
+  ["pull_out", "Pull out"],
+  ["pan_left", "Pan left"],
+  ["pan_right", "Pan right"],
+  ["tilt_up", "Tilt up"],
+  ["tilt_down", "Tilt down"],
+  ["punch_in", "Punch in (impact)"],
+  ["static", "Hold still"],
+];
+
+const PARTICLE_KINDS = [
+  ["none", "None"],
+  ["dust", "Dust"],
+  ["petals", "Petals"],
+  ["embers", "Embers"],
+  ["snow", "Snow"],
+  ["ash", "Ash"],
+];
+
+const TRANSITIONS = [
+  ["cut", "Cut"],
+  ["fade", "Fade"],
+  ["slide_up", "Slide up"],
+  ["slide_left", "Slide left"],
+  ["flash", "Flash"],
+];
+
+function SceneCard({
+  projectId,
+  scene,
+  stage,
+  visualStyle,
+  motionStyle,
+  clipInfo = {},
+  hasNextScene,
+}) {
   const qc = useQueryClient();
   const invalidate = () => qc.invalidateQueries({ queryKey: ["project", projectId] });
 
   const [narration, setNarration] = useState(scene.narration_text);
   const [prompt, setPrompt] = useState(scene.image_prompt);
+  const [motion, setMotion] = useState(scene.motion_prompt || "");
 
   useEffect(() => {
     setNarration(scene.narration_text);
@@ -1544,6 +1590,10 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
   useEffect(() => {
     setPrompt(scene.image_prompt);
   }, [scene.id, scene.image_prompt]);
+
+  useEffect(() => {
+    setMotion(scene.motion_prompt || "");
+  }, [scene.id, scene.motion_prompt]);
 
   const save = useMutation({
     mutationFn: (body) => api.updateScene(projectId, scene.id, body),
@@ -1673,6 +1723,49 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             <strong>{visualStyle}</strong>
           </div>
         )}
+        {scene.scene_type === "video" && (
+          <div className="scene-motion">
+            <div className="scene-motion-head">
+              <span>Motion</span>
+              <small>
+                The picture above is the clip's first frame. Only the text below is
+                sent to the video model as direction, so keep it to what moves and
+                what the camera does. Describing the scenery or the look here makes
+                the model re-paint the frame instead of animating it.
+              </small>
+            </div>
+            <textarea
+              className="scene-prompt"
+              value={motion}
+              placeholder="What moves, in which direction, how fast, and what the camera does."
+              onChange={(e) => setMotion(e.target.value)}
+              onBlur={() =>
+                motion !== (scene.motion_prompt || "") &&
+                save.mutate({ motion_prompt: motion })
+              }
+            />
+            {motionStyle && (
+              <div className="scene-style" title={motionStyle}>
+                <span>Motion style</span>
+                <strong>{motionStyle}</strong>
+              </div>
+            )}
+            <div className="scene-motion-facts">
+              <span>
+                {clipInfo.maxSeconds > 0 && scene.duration_seconds > clipInfo.maxSeconds
+                  ? `Generates ${clipInfo.maxSeconds}s of the ${scene.duration_seconds.toFixed(1)}s scene; the rest is covered by slowing the clip and holding its last frame.`
+                  : "Generates the full length of the scene."}
+              </span>
+              {scene.character_ids?.length > 0 && (
+                <span>
+                  {clipInfo.elements
+                    ? "Character sheets are attached to this clip as identity references."
+                    : "Character sheets are not sent to the video model - the characters are already drawn into the picture."}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         {(contextRefs.length > 0 || continuityContext.length > 0) && (
           <div className="context-refs">
             <div className="context-refs-head">
@@ -1729,12 +1822,19 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
             >
               Still
             </button>
-            <button
-              className={scene.scene_type === "video" ? "on" : ""}
-              onClick={() => save.mutate({ scene_type: "video" })}
-            >
-              Video
-            </button>
+            {(!clipInfo.panelsMode || scene.scene_type === "video") && (
+              <button
+                className={scene.scene_type === "video" ? "on" : ""}
+                onClick={() => save.mutate({ scene_type: "video" })}
+                title={
+                  clipInfo.panelsMode
+                    ? "This group is in panels mode; switch it in Settings to generate video"
+                    : undefined
+                }
+              >
+                Video
+              </button>
+            )}
             {(animationSpec || isAnimation) && (
               <button
                 className={isAnimation ? "on" : ""}
@@ -1745,14 +1845,65 @@ function SceneCard({ projectId, scene, stage, visualStyle, hasNextScene }) {
               </button>
             )}
           </div>
+          {scene.scene_type === "still" && (
+            <>
+              <label
+                className="scene-camera-move"
+                title="The camera move applied over this picture in the final render. It is the only motion a still scene has, so vary it from scene to scene."
+              >
+                <span>Camera</span>
+                <select
+                  value={scene.camera_move || "push_in"}
+                  disabled={save.isPending || busy}
+                  onChange={(e) => save.mutate({ camera_move: e.target.value })}
+                >
+                  {CAMERA_MOVES.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label
+                className="scene-camera-move"
+                title="A drifting overlay on top of the camera move. Used sparingly - a few panels per video, only where the place earns it."
+              >
+                <span>Particles</span>
+                <select
+                  value={scene.particles || "none"}
+                  disabled={save.isPending || busy}
+                  onChange={(e) => save.mutate({ particles: e.target.value })}
+                >
+                  {PARTICLE_KINDS.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              {scene.order_index > 0 && (
+                <label
+                  className="scene-camera-move"
+                  title="How this panel arrives from the one before it. Plays inside this panel's own duration, so captions never shift."
+                >
+                  <span>Arrives</span>
+                  <select
+                    value={scene.transition || "cut"}
+                    disabled={save.isPending || busy}
+                    onChange={(e) => save.mutate({ transition: e.target.value })}
+                  >
+                    {TRANSITIONS.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </>
+          )}
           {scene.scene_type === "video" && hasNextScene && (
             <label
               className="scene-end-frame-toggle"
-              title="Use the following scene's picture as the final frame of this generated clip"
+              title="Make the clip end on the NEXT scene's picture. Only worth it when both scenes show the same subject in the same place - across a cut, the model spends the clip morphing between two different shots instead of animating this one."
             >
               <input
                 type="checkbox"
-                checked={scene.use_next_scene_as_end_frame !== false}
+                checked={scene.use_next_scene_as_end_frame === true}
                 disabled={save.isPending || busy}
                 onChange={(e) =>
                   save.mutate({ use_next_scene_as_end_frame: e.target.checked })

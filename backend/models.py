@@ -55,6 +55,91 @@ class SceneType(str, Enum):
     ANIMATION = "animation"
 
 
+class VisualMode(str, Enum):
+    """How a content group tells its stories visually.
+
+    MIXED is the original behaviour: mostly stills, with the script AI free to
+    mark pivotal beats as generated video. PANELS is a manhwa read — no video at
+    all, many more panels for the same runtime, each one carrying a specific
+    environment, and the whole sense of motion coming from how the camera moves
+    over the artwork at render time. Chosen per group because it is an editorial
+    decision, not a technical one; the video path stays intact either way.
+    """
+
+    MIXED = "mixed"
+    PANELS = "panels"
+
+
+class Particles(str, Enum):
+    """An optional drifting overlay, composited on top of the camera move.
+
+    Deliberately a separate layer rather than an alternative effect: a panel can
+    have a push-in, parallax AND falling ash at once. NONE is the common case —
+    particles on every panel reads as a screensaver, not as atmosphere.
+    """
+
+    NONE = "none"
+    DUST = "dust"
+    PETALS = "petals"
+    EMBERS = "embers"
+    SNOW = "snow"
+    ASH = "ash"
+
+
+class Transition(str, Enum):
+    """How a panel arrives from the one before it.
+
+    Every transition plays inside the incoming panel's OWN duration, starting
+    from the previous panel's final frame — so no two segments ever overlap and
+    the burned-caption timeline stays exactly where the narration put it.
+    """
+
+    CUT = "cut"
+    FADE = "fade"
+    SLIDE_UP = "slide_up"
+    SLIDE_LEFT = "slide_left"
+    FLASH = "flash"
+
+
+class CameraMove(str, Enum):
+    """The camera move for a shot.
+
+    On a still it is the whole of the motion the viewer sees: it is applied as a
+    real move over the image at render time (services/ffmpeg.ken_burns_clip), so
+    picking a different one per scene is what keeps a still-heavy video from
+    looking like a slideshow with one repeated zoom. On a video scene it rides
+    along as a hint in the clip prompt and should agree with motion_prompt.
+    """
+
+    STATIC = "static"
+    PUSH_IN = "push_in"
+    PULL_OUT = "pull_out"
+    PAN_LEFT = "pan_left"
+    PAN_RIGHT = "pan_right"
+    TILT_UP = "tilt_up"
+    TILT_DOWN = "tilt_down"
+    # A hard, fast zoom that lands in the first fraction of the panel and then
+    # holds — the manhwa impact beat. Deliberately not a slow push.
+    PUNCH_IN = "punch_in"
+
+
+# Plain-language camera direction, reused in the clip prompt so the video model
+# is told the move in words rather than in our enum.
+# Keyed by the enum's VALUE, not the member: a str-Enum member hashes by its
+# name, so a dict keyed by members cannot be looked up with the plain string
+# that arrives from the DB or the API.
+CAMERA_MOVE_PHRASES: dict[str, str] = {
+    CameraMove.STATIC.value: "the camera is locked off and does not move",
+    CameraMove.PUSH_IN.value: "the camera pushes slowly in toward the subject",
+    CameraMove.PULL_OUT.value: "the camera pulls slowly back to reveal more of the scene",
+    CameraMove.PAN_LEFT.value: "the camera pans steadily to the left",
+    CameraMove.PAN_RIGHT.value: "the camera pans steadily to the right",
+    CameraMove.TILT_UP.value: "the camera tilts steadily upward",
+    CameraMove.TILT_DOWN.value: "the camera tilts steadily downward",
+    CameraMove.PUNCH_IN.value: "the camera snaps in hard on the subject and holds",
+}
+
+
 # --------------------------------------------------------------------------- #
 # Tables
 # --------------------------------------------------------------------------- #
@@ -118,10 +203,26 @@ class Scene(SQLModel, table=True):
     order_index: int = 0
     narration_text: str = ""
     image_prompt: str = ""
+    # What MOVES, for video scenes only. Sent to the video model in place of
+    # image_prompt, which describes a frozen frame and reads to an i2v model as
+    # "render this again" rather than "animate it". Empty on stills/animations.
+    motion_prompt: str = ""
+    # The shot's camera move. On stills this is the entire motion the viewer gets
+    # (applied at render time); on video scenes it is a hint in the clip prompt.
+    camera_move: CameraMove = Field(default=CameraMove.PUSH_IN)
+    # Drifting overlay for this panel, and how this panel arrives from the one
+    # before it. Both are layers on top of the camera move, not replacements for
+    # it, and both default to off because restraint is what makes them land.
+    particles: Particles = Field(default=Particles.NONE)
+    transition: Transition = Field(default=Transition.CUT)
     continuity_context: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     scene_type: SceneType = Field(default=SceneType.STILL)
     # For video scenes, optionally animate toward the following scene's still.
-    use_next_scene_as_end_frame: bool = True
+    # Off by default: the next scene is usually a different shot in a different
+    # place, and asking the model to interpolate across a cut spends the clip on
+    # a morph (or makes it hold). Worth turning on only when the two scenes
+    # genuinely share a subject and a location.
+    use_next_scene_as_end_frame: bool = False
     character_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     character_assignments: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     # Names the LLM flagged that don't yet exist in the global library.
@@ -229,6 +330,26 @@ class ContentPreset(SQLModel, table=True):
     # two describe different media (a rendered photo vs. drawn geometry) and
     # neither reaches the script LLM.
     animation_style_prompt: str = ""
+    # And once more for motion: how things move in this group's videos, handed to
+    # the image-to-video call alongside the scene's motion_prompt. Kept apart from
+    # image_style_prompt on purpose — style words ("dramatic rim light",
+    # "atmospheric") are exactly what makes an i2v model paint effects over a
+    # still instead of moving it, so the look never reaches the video model and
+    # this field describes movement only.
+    motion_style_prompt: str = ""
+    # Panels vs. mixed. See VisualMode — this decides whether the script AI is
+    # even allowed to emit a video scene, and how densely it breaks the story
+    # into panels.
+    visual_mode: VisualMode = Field(default=VisualMode.MIXED)
+    # Target seconds of narration per panel in PANELS mode. Lower means more
+    # panels for the same runtime, which is what makes it read like a manhwa
+    # page rather than a slideshow. Ignored in MIXED mode.
+    panel_seconds: float = 4.0
+    # Depth-based 2.5D parallax over each still at render time. Costs roughly
+    # 7x realtime on CPU, so it is a per-group choice rather than always-on, and
+    # it silently falls back to the flat camera move when the depth model is not
+    # installed (see services/parallax.available).
+    panel_parallax: bool = True
     voice_id: str = ""
     # When on, the script LLM may mark scenes as deterministic animations and
     # emit an animation spec for them. Off by default so narrative/photographic

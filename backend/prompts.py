@@ -35,7 +35,52 @@ For each scene you must provide:
     styles, or aesthetic labels; the visual style is applied later from the \
     active content preset. If named characters appear, include their exact names \
     and role/action in the image_prompt so downstream image and video models can \
-    match them to their reference images. Make each prompt usable on its own.
+    match them to their reference images. Make each prompt usable on its own. \
+    IMPORTANT, for scenes you mark "video": this image becomes the FIRST FRAME of \
+    a generated clip, so describe the moment just BEFORE the action peaks, not the \
+    peak itself — weight shifted and about to move, arm drawn back, cloak not yet \
+    caught by the wind, the blow not yet landed. A frame already at the height of \
+    the action has nowhere left to go and the video model will simply hold it. \
+    Save the payoff for motion_prompt.
+  - motion_prompt: what physically MOVES in this shot and how the camera moves. \
+    Required for "video" scenes; use an empty string for "still" and "animation". \
+    Write motion ONLY: which subject or body part moves, in which direction, how \
+    fast, and what the camera does. Do NOT restate the setting, the lighting, the \
+    mood, the colors, or the look — the start image already carries all of that, \
+    and repeating it makes the model re-render the frame instead of moving it. One \
+    or two plain sentences. Prefer one deliberate gesture plus one clear camera \
+    move over several simultaneous actions. Never ask for lightning, glows, sparks, \
+    light rays, energy, or particles that are not already visible in the start \
+    image; that is the most common way these clips turn into a light show over a \
+    frozen picture.
+  - camera_move: the camera move for this shot, chosen from the values in the \
+    response schema. For "still" scenes this is the only motion the viewer gets — \
+    it is applied as a real camera move over the image at render time — so pick it \
+    per scene and VARY it across the video rather than repeating one move. Match \
+    the beat: push_in to build tension or land a revelation, pull_out to reveal \
+    scale or consequence, pan_left/pan_right to travel across a landscape, a crowd, \
+    or a line of figures, tilt_up for height and awe, tilt_down for a fall or a \
+    descent, static only when stillness is the point, punch_in for a beat that is \
+    meant to hit. For "video" scenes it should agree with the camera move you \
+    described in motion_prompt.
+  - particles: an optional drifting overlay on this panel, from the values in the \
+    response schema. It is an extra layer on top of camera_move, never a \
+    substitute for it — a panel can have a push-in and falling ash at once. \
+    Default to "none" and mean it. Across a whole video no more than roughly one \
+    panel in four should carry particles, and only where the place itself earns \
+    them: ash in a burning or ruined place, embers over a fire or a forge, petals \
+    in blossom or at a wedding, snow in winter or on a peak, dust in a tomb, a \
+    ruin, a desert, or a shaft of light. Never add particles just to make a panel \
+    livelier. Three panels of drifting petals in a row is worse than none, and it \
+    is the clean panels that make the next dusty one land.
+  - transition: how this panel arrives from the panel before it, from the values \
+    in the response schema. Default to "cut" — a comic reads in cuts, and almost \
+    every panel should be one. Use the others only where the story actually turns: \
+    "fade" across a jump in time or place, "slide_up" or "slide_left" to carry \
+    momentum through a fall, a chase, or a descent, and "flash" for a violent or \
+    revelatory beat such as a blow landing, a death, or a god appearing. A handful \
+    in a whole video, not one every few panels. The first scene must be "cut": \
+    there is nothing for it to arrive from.
   - continuity_context: an array of continuity links to earlier scene images. Use \
     this ONLY when this scene genuinely needs a previously established prop, \
     location, costume detail, symbol, vehicle, artifact, or environment to stay \
@@ -125,6 +170,42 @@ def _animation_guidance(latex_available: bool = False) -> str:
     )
 
 
+def _panel_guidance(panel_seconds: float) -> str:
+    """Panel-mode authoring rules (added only when the group is in PANELS mode).
+
+    Nothing here is about motion: the sense of movement comes from the camera
+    move chosen per panel and applied at render time. What this block buys is
+    density and specificity — many short beats, each with a real place in it,
+    instead of a handful of long scenes with vague backgrounds.
+    """
+    return (
+        "## Panels (this group is read like a manhwa, not watched like a film)\n"
+        "There is NO generated video in this group. Every scene is one still "
+        "panel, and the only motion the viewer sees is the camera move applied "
+        "over that panel at render time. Write accordingly.\n\n"
+        f"Break the story into many short beats — aim for roughly "
+        f"{panel_seconds:.0f} seconds of narration per panel, so a longer video "
+        "becomes a lot of panels rather than a few slow ones. A beat is one "
+        "moment: a decision, a reaction, an arrival, a line landing, a detail "
+        "the viewer should notice. When a sentence contains two moments, split "
+        "it into two panels.\n\n"
+        "Every image_prompt must put the panel somewhere specific. Name the "
+        "place, the time of day, the weather, and what the light is doing, and "
+        "describe the foreground, the middle ground and the background as "
+        "separate layers — what is close to us, what the subject stands in, "
+        "what sits far behind. Include the concrete props and textures that "
+        "belong to that place. A panel described only as a character against a "
+        "vague mood is a wasted panel.\n\n"
+        "Vary the shot scale deliberately across consecutive panels, the way a "
+        "real manhwa page does: an establishing wide to place the reader, a "
+        "medium for dialogue and action, a close-up for emotion, a tight insert "
+        "on a hand or an object or an eye, a reaction shot. Never run three "
+        "panels at the same scale in a row. The same applies to camera_move — "
+        "choose the one that fits each beat and keep it changing, and use "
+        "punch_in for the moments that are meant to hit."
+    )
+
+
 def _revision_notes_block(revision_notes: str) -> str:
     """The creator's correction notes for this project, as its own section.
 
@@ -151,6 +232,8 @@ def build_script_prompt(
     enable_animations: bool = False,
     latex_available: bool = False,
     revision_notes: str = "",
+    panels_mode: bool = False,
+    panel_seconds: float = 4.0,
 ) -> str:
     """Assemble the full user-facing instruction: platform + content + project.
 
@@ -171,6 +254,8 @@ def build_script_prompt(
     ]
     if enable_animations:
         parts += [_animation_guidance(latex_available), ""]
+    if panels_mode:
+        parts += [_panel_guidance(panel_seconds), ""]
     parts += [
         "## This project",
         f"Topic / idea: {topic.strip()}",
@@ -182,7 +267,19 @@ def build_script_prompt(
         "scene content, mood, composition, lighting, and framing. Do not include "
         "art style words because image/video style is applied separately from "
         "the content preset. When a scene includes characters, put their exact "
-        "names and clear actions/positions in the image_prompt. In characters, "
+        "names and clear actions/positions in the image_prompt. For every scene "
+        "pick a camera_move that fits that beat, and vary it across the video — a "
+        "whole video on one repeated move looks mechanical. "
+        + (
+            "Leave motion_prompt empty on every scene: this group generates no "
+            "video, so there is nothing for it to drive. "
+            if panels_mode
+            else "For \"video\" scenes write the image_prompt as the moment BEFORE "
+            "the action and put the action itself in motion_prompt, keeping "
+            "motion_prompt to movement and camera only with no scenery, lighting, "
+            "or style words in it. "
+        )
+        + "In characters, "
         "leave state empty unless this scene needs a major identity/form state "
         "with its own reference sheet. For each scene, "
         "fill continuity_context with explicit earlier source_scene references "
@@ -206,6 +303,23 @@ SCRIPT_JSON_SCHEMA: dict = {
                 "properties": {
                     "narration_text": {"type": "string"},
                     "image_prompt": {"type": "string"},
+                    "motion_prompt": {"type": "string"},
+                    "camera_move": {
+                        "type": "string",
+                        "enum": [
+                            "static", "push_in", "pull_out",
+                            "pan_left", "pan_right", "tilt_up", "tilt_down",
+                            "punch_in",
+                        ],
+                    },
+                    "particles": {
+                        "type": "string",
+                        "enum": ["none", "dust", "petals", "embers", "snow", "ash"],
+                    },
+                    "transition": {
+                        "type": "string",
+                        "enum": ["cut", "fade", "slide_up", "slide_left", "flash"],
+                    },
                     "continuity_context": {
                         "type": "array",
                         "items": {
@@ -238,7 +352,11 @@ SCRIPT_JSON_SCHEMA: dict = {
                         },
                     },
                 },
-                "required": ["narration_text", "image_prompt", "continuity_context", "scene_type", "characters"],
+                "required": [
+                    "narration_text", "image_prompt", "motion_prompt", "camera_move",
+                    "particles", "transition",
+                    "continuity_context", "scene_type", "characters",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -264,19 +382,25 @@ SCRIPT_JSON_SCHEMA: dict = {
 }
 
 
-def build_script_schema(enable_animations: bool = False) -> dict:
-    """The structured-output schema, optionally extended for animation scenes.
+def build_script_schema(
+    enable_animations: bool = False, panels_mode: bool = False
+) -> dict:
+    """The structured-output schema, adjusted for the group's capabilities.
 
-    With animations off this is byte-for-byte ``SCRIPT_JSON_SCHEMA`` (so the
-    default mythology path is unchanged). With animations on, the only change is
-    that "animation" joins the scene_type enum. The LLM does NOT author any Manim
-    code here — it merely picks the scene_type; the diagram is generated later,
-    after audio exists, from the scene's narration (see backend/adapters/llm.py
-    ``author_manim_code`` and pipeline ``_render_scene_animation``).
+    With animations off and panels off this is byte-for-byte
+    ``SCRIPT_JSON_SCHEMA``. Animations add "animation" to the scene_type enum;
+    panels mode REMOVES "video" from it, which is what actually guarantees a
+    panels group can never run up a generation bill — the model has no way to
+    express a video scene rather than merely being asked not to.
     """
-    if not enable_animations:
+    if not enable_animations and not panels_mode:
         return SCRIPT_JSON_SCHEMA
     schema = copy.deepcopy(SCRIPT_JSON_SCHEMA)
     scene = schema["properties"]["scenes"]["items"]
-    scene["properties"]["scene_type"]["enum"] = ["still", "video", "animation"]
+    types = ["still"]
+    if not panels_mode:
+        types.append("video")
+    if enable_animations:
+        types.append("animation")
+    scene["properties"]["scene_type"]["enum"] = types
     return schema

@@ -112,6 +112,26 @@ class Settings(BaseModel):
     fal_krea_image_model: str = "krea/v2/medium/text-to-image"
     # Image-to-video generation (fal.ai model slug)
     fal_video_model: str = "fal-ai/kling-video/v3/standard/image-to-video"
+    # Whether to attach character reference sheets to the image-to-video call as
+    # Kling "elements". Off by default on measured evidence: on an A/B over the
+    # same start frame and the same prompt, the run WITH references left the
+    # start frame roughly three times faster over the first half of the clip and
+    # was the only one to invent a large light effect. References are what keep
+    # identity stable at the IMAGE stage, where the model is drawing a character
+    # from scratch; by the video stage the character is already in the frame, and
+    # handing the model competing portraits of them mostly gives it license to
+    # re-compose the shot. Set VIDEO_CHARACTER_ELEMENTS=1 to put them back.
+    video_character_elements: bool = os.getenv("VIDEO_CHARACTER_ELEMENTS", "0") not in (
+        "0", "", "false", "False",
+    )
+    # Longest clip to generate for one scene, whatever its narration length.
+    # Generation is billed per second and the back half of a long clip is where
+    # an i2v model wanders off the art direction — measured on this pipeline, a
+    # clip stays close to its start frame for roughly two seconds and has
+    # usually abandoned the composition by four. Whatever the scene still needs
+    # after this is covered by slowing the clip and holding its final frame
+    # (services/ffmpeg._normalize_clip). 0 disables the cap.
+    max_clip_seconds: float = float(os.getenv("MAX_CLIP_SECONDS", "5"))
     # TTS (ElevenLabs voice + model)
     elevenlabs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
     elevenlabs_model: str = "eleven_multilingual_v2"

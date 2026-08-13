@@ -5,7 +5,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
-from .models import SceneType
+from .models import CameraMove, Particles, SceneType, Transition, VisualMode
 
 
 # --- Projects ---
@@ -96,6 +96,10 @@ class MusicTrackSelect(BaseModel):
 class SceneUpdate(BaseModel):
     narration_text: Optional[str] = None
     image_prompt: Optional[str] = None
+    motion_prompt: Optional[str] = None
+    camera_move: Optional[CameraMove] = None
+    particles: Optional[Particles] = None
+    transition: Optional[Transition] = None
     continuity_context: Optional[list[dict]] = None
     scene_type: Optional[SceneType] = None
     animation_spec: Optional[dict] = None
@@ -144,6 +148,10 @@ class ContentPresetIn(BaseModel):
     content_prompt: str = ""
     image_style_prompt: str = ""
     animation_style_prompt: str = ""
+    motion_style_prompt: str = ""
+    visual_mode: VisualMode = VisualMode.MIXED
+    panel_seconds: float = 4.0
+    panel_parallax: bool = True
     voice_id: str = ""
     enable_animations: bool = False
     is_default: bool = False

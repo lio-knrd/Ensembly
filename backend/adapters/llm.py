@@ -43,6 +43,17 @@ def _extract_json(text: str) -> dict:
         raise
 
 
+# Mirrors models.CameraMove; kept as plain strings so the adapter layer stays
+# free of the DB models.
+_CAMERA_MOVES = {
+    "static", "push_in", "pull_out", "pan_left", "pan_right", "tilt_up",
+    "tilt_down", "punch_in",
+}
+_OFFLINE_MOVES = ["push_in", "pan_right", "pull_out", "tilt_up", "pan_left", "tilt_down"]
+_PARTICLES = {"none", "dust", "petals", "embers", "snow", "ash"}
+_TRANSITIONS = {"cut", "fade", "slide_up", "slide_left", "flash"}
+
+
 def _coerce_script(data: dict) -> GeneratedScript:
     scenes = []
     for raw in data.get("scenes", []):
@@ -91,10 +102,26 @@ def _coerce_script(data: dict) -> GeneratedScript:
                         "state_importance": "default",
                         "state_notes": "",
                     })
+        move = str(raw.get("camera_move", "") or "").strip().lower()
+        if move not in _CAMERA_MOVES:
+            # A still with no usable move still needs one, or it renders dead.
+            move = "static" if st == "animation" else "push_in"
+        particles = str(raw.get("particles", "") or "").strip().lower()
+        transition = str(raw.get("transition", "") or "").strip().lower()
         scenes.append(
             GeneratedScene(
                 narration_text=str(raw.get("narration_text", "")).strip(),
                 image_prompt=str(raw.get("image_prompt", "")).strip(),
+                motion_prompt=str(raw.get("motion_prompt", "") or "").strip(),
+                camera_move=move,
+                particles=particles if particles in _PARTICLES else "none",
+                # The first scene has no predecessor to arrive from, so any
+                # transition it asks for is meaningless.
+                transition=(
+                    transition
+                    if transition in _TRANSITIONS and scenes
+                    else "cut"
+                ),
                 scene_type=st,
                 characters=characters,
                 continuity_context=continuity_context,
@@ -185,6 +212,8 @@ class OfflineScriptGenerator(ScriptGenerator):
                 f"with the weight of everything that came before."
             )
             scene_type = "video" if i in (0, n_scenes - 1) else "still"
+            # Cycle the moves so the offline render exercises every camera path.
+            move = _OFFLINE_MOVES[i % len(_OFFLINE_MOVES)]
             scenes.append(
                 GeneratedScene(
                     narration_text=textwrap.shorten(narration, width=320, placeholder="..."),
@@ -193,6 +222,11 @@ class OfflineScriptGenerator(ScriptGenerator):
                         f"Clear focal subject, dramatic moment, strong composition, "
                         f"expressive lighting, vertical 9:16 framing."
                     ),
+                    motion_prompt=(
+                        "The subject turns slowly toward the viewer and the camera "
+                        "pushes in." if scene_type == "video" else ""
+                    ),
+                    camera_move=move,
                     scene_type=scene_type,
                     # Spread the guessed cast across scenes so the character-sheet
                     # review step is exercised offline too.

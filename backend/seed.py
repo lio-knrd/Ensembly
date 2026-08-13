@@ -5,12 +5,87 @@ content = "Greek Mythology" (spec section 5).
 """
 from __future__ import annotations
 
+import json
+
 from sqlmodel import Session, select
 
 from .config import settings
 from .database import engine
-from .models import ContentPreset, PlatformPreset, Setting
+from .models import ContentPreset, PlatformPreset, Setting, VisualMode
 from .services.music_library import backfill_legacy_defaults, seed_local_library
+
+# --------------------------------------------------------------------------- #
+# Motion house styles
+# --------------------------------------------------------------------------- #
+# How things MOVE in a group's video scenes, handed to the image-to-video model
+# alongside the scene's own motion_prompt. Deliberately free of look/lighting
+# words: describing the style to an i2v model is what makes it paint effects
+# over a still instead of animating it. Every one of these ends by ruling out
+# invented light and particle effects, which is the failure mode these clips
+# fall into when they have nothing concrete to move.
+GENERIC_MOTION_STYLE = (
+    "Move the shot, not the design. One clear action at a time, carried by a "
+    "steady camera move rather than by animating everything at once. Secondary "
+    "matter that hangs or floats — hair, cloth, smoke, dust, water, foliage — "
+    "drifts gently and continuously so the frame never feels frozen. Keep the "
+    "framing readable and the pace unhurried. Do not add lightning, glows, "
+    "sparks, light rays, lens flares, or particle effects that are not already "
+    "in the start frame, and do not redraw or restyle anything in it."
+)
+
+MOTION_STYLES_BY_PRESET: dict[str, str] = {
+    "Greek Mythology": (
+        "Limited 2D animation, the way real anime and webtoon adaptations move: "
+        "the drawing largely holds and the CAMERA does the work — slow push-ins, "
+        "gentle parallax drifts across the panel, a deliberate tilt to reveal "
+        "scale. Cloth, hair, smoke, embers and falling debris drift continuously "
+        "so the frame breathes. Character motion is one committed gesture — a "
+        "head turn, a raised arm, a step forward, a weapon lifted — not full-body "
+        "articulation and not running or fighting choreography. Weight is heavy "
+        "and unhurried; gods move like they are certain. Do not add lightning, "
+        "divine glows, energy auras, speed lines, sparks, light rays or lens "
+        "flares that are not already drawn in the start frame."
+    ),
+    "Cat Cartoon": (
+        "Broad, readable cartoon motion: one big clear action per shot with a "
+        "little anticipation before it and a little settle after. Bouncy, springy "
+        "timing rather than smooth realism, but keep it simple — a head turn, a "
+        "hop, ears and tail flicking, a paw reaching. Faces stay expressive: "
+        "blinks and small mouth movement even when the body holds. The camera "
+        "moves plainly, a straight push-in or a level pan, never handheld. Do not "
+        "add sparkles, glows, light rays, motion streaks or particle effects that "
+        "are not already in the start frame, and keep the linework and colors "
+        "exactly as drawn."
+    ),
+    "Math & Science (animated)": (
+        "Calm, documentary motion. Real footage here exists to give the viewer "
+        "somewhere to rest between diagrams, so it should never compete with "
+        "them: a slow push-in or a level pan, one subject doing one ordinary "
+        "thing, everything else still. No fast camera work, no whip pans, no "
+        "dramatic reveals. Do not add glows, light rays, floating particles, "
+        "data-viz overlays, numbers, or text of any kind — anything explanatory "
+        "is drawn precisely in an animation scene instead."
+    ),
+    "Kaltgerechnet (DE)": (
+        "Flat graphic motion, not character animation. Shapes translate, scale "
+        "and reveal along straight paths at a constant, unfussy speed; the camera "
+        "either holds or pushes in slowly. Think of elements sliding into place "
+        "on a poster rather than a scene coming to life. Nothing wobbles, nothing "
+        "bounces, nothing is hand-held. People, when present, make one small "
+        "deliberate movement and hold. Do not add glows, gradients, shadows, "
+        "light rays, sparks or particles, and do not add depth or shading that is "
+        "not already in the start frame."
+    ),
+    "You Guessed Wrong (EN)": (
+        "Flat graphic motion, not character animation. Silhouettes and shapes "
+        "move along clean straight paths at a steady speed, or the camera pushes "
+        "in slowly while they hold. One element moves at a time so the point of "
+        "the frame stays obvious. No wobble, no bounce, no handheld camera, no "
+        "crowd or background activity. Do not add glows, light rays, sparks, "
+        "particles, gradients or shading, and do not add depth that is not "
+        "already in the start frame."
+    ),
+}
 
 DEFAULT_PLATFORM = PlatformPreset(
     name="TikTok",
@@ -43,6 +118,11 @@ DEFAULT_CONTENT = ContentPreset(
         "brushwork, epic mythological atmosphere, rich but muted color palette, "
         "consistent across all scenes. Vertical 9:16 composition."
     ),
+    motion_style_prompt=MOTION_STYLES_BY_PRESET["Greek Mythology"],
+    # Read as a manhwa: no generated video, many more panels, motion supplied by
+    # the camera move over each panel. Kept as this group's default because it
+    # is what the channel actually ships.
+    visual_mode=VisualMode.PANELS,
     voice_id=settings.elevenlabs_voice_id,
 )
 
@@ -68,6 +148,7 @@ DEFAULT_MATH_CONTENT = ContentPreset(
         "them; labels are small and sit directly beneath what they name. No "
         "gradients, no glow, no decorative motion."
     ),
+    motion_style_prompt=MOTION_STYLES_BY_PRESET["Math & Science (animated)"],
     enable_animations=True,
     voice_id=settings.elevenlabs_voice_id,
 )
@@ -80,9 +161,48 @@ DEFAULT_SETTINGS: dict[str, object] = {
 }
 
 
-def seed() -> None:
-    import json
+def backfill_motion_styles(session: Session) -> None:
+    """Give every existing group a motion house style, once.
 
+    ``motion_style_prompt`` arrived after these groups were created, so without
+    this they would all sit empty and their clips would go out with no motion
+    guidance at all. Groups shipped with the app get the text written for their
+    look; anything the creator made themselves gets the generic one, which is
+    still far better than nothing. Guarded by a marker so a creator who later
+    clears the field on purpose does not get it refilled on the next start.
+    """
+    if session.get(Setting, "backfilled_motion_styles") is not None:
+        return
+    for preset in session.exec(select(ContentPreset)).all():
+        if (preset.motion_style_prompt or "").strip():
+            continue
+        preset.motion_style_prompt = MOTION_STYLES_BY_PRESET.get(
+            preset.name, GENERIC_MOTION_STYLE
+        )
+        session.add(preset)
+    session.add(Setting(key="backfilled_motion_styles", value=json.dumps(True)))
+
+
+def switch_mythology_to_panels(session: Session) -> None:
+    """Put the mythology group into panels mode, once.
+
+    Generated video on detailed key art produced clips that slid the artwork
+    around instead of animating it, so this group stops generating video and
+    tells its stories in panels instead. One-time and marker-guarded: a creator
+    who switches the group back to mixed keeps that choice.
+    """
+    if session.get(Setting, "mythology_panels_mode") is not None:
+        return
+    preset = session.exec(
+        select(ContentPreset).where(ContentPreset.name == DEFAULT_CONTENT.name)
+    ).first()
+    if preset:
+        preset.visual_mode = VisualMode.PANELS
+        session.add(preset)
+    session.add(Setting(key="mythology_panels_mode", value=json.dumps(True)))
+
+
+def seed() -> None:
     with Session(engine) as session:
         seed_local_library(session)
         session.flush()
@@ -100,6 +220,9 @@ def seed() -> None:
             if not exists:
                 session.add(DEFAULT_MATH_CONTENT)
             session.add(Setting(key="seeded_math_preset", value=json.dumps(True)))
+        session.flush()
+        backfill_motion_styles(session)
+        switch_mythology_to_panels(session)
         for key, value in DEFAULT_SETTINGS.items():
             existing = session.get(Setting, key)
             if existing is None:

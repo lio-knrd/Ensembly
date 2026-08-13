@@ -637,6 +637,13 @@ function PresetEditor({
   const [animStyle, setAnimStyle] = useState(
     styleField ? preset.animation_style_prompt || "" : ""
   );
+  const [motionStyle, setMotionStyle] = useState(
+    styleField ? preset.motion_style_prompt || "" : ""
+  );
+  const [visualMode, setVisualMode] = useState(preset.visual_mode || "mixed");
+  const [panelSeconds, setPanelSeconds] = useState(preset.panel_seconds ?? 4);
+  const [panelParallax, setPanelParallax] = useState(preset.panel_parallax !== false);
+  const panelsMode = visualMode === "panels";
   const [voiceId, setVoiceId] = useState(styleField ? preset.voice_id || "" : "");
   const [enableAnimations, setEnableAnimations] = useState(!!preset.enable_animations);
   const [voiceSearch, setVoiceSearch] = useState("");
@@ -682,6 +689,10 @@ function PresetEditor({
     (styleField &&
       (style !== (preset[styleField] || "") ||
         animStyle !== (preset.animation_style_prompt || "") ||
+        motionStyle !== (preset.motion_style_prompt || "") ||
+        visualMode !== (preset.visual_mode || "mixed") ||
+        Number(panelSeconds) !== (preset.panel_seconds ?? 4) ||
+        panelParallax !== (preset.panel_parallax !== false) ||
         voiceId !== (preset.voice_id || "") ||
         enableAnimations !== !!preset.enable_animations));
 
@@ -690,6 +701,10 @@ function PresetEditor({
     const body = { name, [promptField]: prompt, is_default: isDefault };
     if (styleField) body[styleField] = style;
     if (styleField) body.animation_style_prompt = animStyle;
+    if (styleField) body.motion_style_prompt = motionStyle;
+    if (styleField) body.visual_mode = visualMode;
+    if (styleField) body.panel_seconds = Number(panelSeconds) || 4;
+    if (styleField) body.panel_parallax = panelParallax;
     if (styleField) body.voice_id = voiceId;
     if (styleField) body.enable_animations = enableAnimations;
     Promise.resolve(onSave(body)).finally(() => setSaving(false));
@@ -725,6 +740,63 @@ function PresetEditor({
       <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} />
       {styleField && (
         <>
+          <label className="preset-field-label">How this group tells its stories</label>
+          <div className="seg visual-mode-seg">
+            <button
+              type="button"
+              className={!panelsMode ? "on" : ""}
+              onClick={() => setVisualMode("mixed")}
+            >
+              Stills + video
+            </button>
+            <button
+              type="button"
+              className={panelsMode ? "on" : ""}
+              onClick={() => setVisualMode("panels")}
+            >
+              Panels (manhwa)
+            </button>
+          </div>
+          <div className="style-assistant-note">
+            {panelsMode
+              ? "No video is generated for this group at all - the script AI cannot even mark a scene as video, so nothing can run up a generation bill. The story is told in many more panels, each with a real environment described, and the motion comes from the camera move over each panel."
+              : "The script AI may mark pivotal beats as generated video clips, which are billed per second by the video provider."}
+          </div>
+          {panelsMode && (
+            <>
+              <label className="preset-field-label">Seconds of narration per panel</label>
+              <input
+                type="number"
+                min="1.5"
+                max="12"
+                step="0.5"
+                value={panelSeconds}
+                onChange={(e) => setPanelSeconds(e.target.value)}
+              />
+              <div className="style-assistant-note">
+                Lower means more panels for the same runtime - a 75 second video at
+                4s per panel is around 19 panels. This is a target the script AI
+                aims for, not a hard cut.
+              </div>
+              <label className="preset-field-label">2.5D parallax</label>
+              <label className="row" style={{ fontSize: 13, cursor: "pointer", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  style={{ width: "auto" }}
+                  checked={panelParallax}
+                  onChange={(e) => setPanelParallax(e.target.checked)}
+                />
+                Estimate depth for each panel and move near and far parts of the
+                image at different rates, so the camera move reads as
+                dimensional instead of flat.
+              </label>
+              <div className="style-assistant-note">
+                Adds roughly 25 seconds of render time per panel and runs
+                entirely on this machine. Turn it off for faster renders; panels
+                then use the plain camera move.
+              </div>
+            </>
+          )}
           <label className="preset-field-label">
             Image style (applied to character sheets &amp; scene images, not the script)
           </label>
@@ -768,6 +840,24 @@ function PresetEditor({
               </div>
               {styleError && <div className="form-error">{styleError}</div>}
             </div>
+          )}
+          {!panelsMode && (
+            <>
+              <label className="preset-field-label">
+                Motion style (applied to video scenes only, never sent to the image
+                model or the script)
+              </label>
+              <textarea
+                value={motionStyle}
+                onChange={(e) => setMotionStyle(e.target.value)}
+                placeholder="How things move: how much the camera does vs. the characters, what drifts continuously, what the model must not add."
+              />
+              <div className="style-assistant-note">
+                Describe movement only. The image style above deliberately never
+                reaches the video model - look and lighting words are what make it
+                paint effects over a frozen frame instead of animating it.
+              </div>
+            </>
           )}
           <label className="preset-field-label">Voice generation</label>
           <input

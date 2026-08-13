@@ -14,6 +14,11 @@ from .config import settings
 _ADDED_COLUMNS = [
     ("content_presets", "image_style_prompt", "TEXT DEFAULT ''"),
     ("content_presets", "animation_style_prompt", "TEXT DEFAULT ''"),
+    ("content_presets", "motion_style_prompt", "TEXT DEFAULT ''"),
+    # Enum column: stored by member NAME, like scene_type and camera_move.
+    ("content_presets", "visual_mode", "TEXT DEFAULT 'MIXED'"),
+    ("content_presets", "panel_seconds", "REAL DEFAULT 4.0"),
+    ("content_presets", "panel_parallax", "BOOLEAN DEFAULT 1"),
     ("content_presets", "voice_id", "TEXT DEFAULT ''"),
     ("characters", "reference_prompt", "TEXT DEFAULT ''"),
     ("characters", "reference_style_prompt", "TEXT DEFAULT ''"),
@@ -25,7 +30,13 @@ _ADDED_COLUMNS = [
     ("scenes", "continuity_context", "JSON DEFAULT '[]'"),
     ("scenes", "excluded_context_scene_ids", "JSON DEFAULT '[]'"),
     ("scenes", "character_assignments", "JSON DEFAULT '[]'"),
-    ("scenes", "use_next_scene_as_end_frame", "BOOLEAN DEFAULT 1"),
+    ("scenes", "use_next_scene_as_end_frame", "BOOLEAN DEFAULT 0"),
+    ("scenes", "motion_prompt", "TEXT DEFAULT ''"),
+    # SQLAlchemy stores an Enum column by member NAME, not by value, so the
+    # column default has to be the name (see scene_type, stored as "STILL").
+    ("scenes", "camera_move", "TEXT DEFAULT 'PUSH_IN'"),
+    ("scenes", "particles", "TEXT DEFAULT 'NONE'"),
+    ("scenes", "transition", "TEXT DEFAULT 'CUT'"),
     ("scenes", "image_variants", "JSON DEFAULT '[]'"),
     ("scenes", "clip_variants", "JSON DEFAULT '[]'"),
     ("scenes", "video_request_id", "TEXT DEFAULT NULL"),
@@ -136,6 +147,37 @@ def _run_migrations() -> None:
                     conn.execute(text("UPDATE projects SET title_is_custom = 1"))
                 if table == "characters" and column == "content_preset_id":
                     _backfill_character_groups(conn)
+                # End frames used to default on, which pointed every clip at the
+                # NEXT scene's still — a different shot in a different place, so
+                # the clip was spent morphing across a cut. The default is now
+                # off; existing rows are flipped once, here, rather than on every
+                # start, so a scene deliberately switched back on stays on.
+                if table == "scenes" and column == "motion_prompt":
+                    conn.execute(
+                        text("UPDATE scenes SET use_next_scene_as_end_frame = 0")
+                    )
+        # Enum columns hold member names. A row written with a value instead
+        # ("push_in" for PUSH_IN) fails to load at all, so normalize rather than
+        # leave the project unopenable. Idempotent: every name is upper case.
+        conn.execute(
+            text(
+                "UPDATE scenes SET camera_move = UPPER(camera_move) "
+                "WHERE camera_move IS NOT NULL AND camera_move <> UPPER(camera_move)"
+            )
+        )
+        conn.execute(
+            text(
+                "UPDATE content_presets SET visual_mode = UPPER(visual_mode) "
+                "WHERE visual_mode IS NOT NULL AND visual_mode <> UPPER(visual_mode)"
+            )
+        )
+        for column in ("particles", "transition"):
+            conn.execute(
+                text(
+                    f"UPDATE scenes SET {column} = UPPER({column}) "
+                    f"WHERE {column} IS NOT NULL AND {column} <> UPPER({column})"
+                )
+            )
 
 
 def _repair_nullable_orphans() -> None:

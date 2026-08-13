@@ -6,6 +6,7 @@ be re-run for a single scene or the whole project without restarting from IDEA.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import traceback
@@ -32,18 +33,23 @@ from .config import settings
 from .database import engine
 from .events import bus
 from .models import (
+    CAMERA_MOVE_PHRASES,
+    CameraMove,
     Character,
     CharacterForm,
     ContentPreset,
     MusicTrack,
+    Particles,
     PlatformPreset,
     Project,
     ProjectCharacter,
     Scene,
     SceneType,
     Stage,
+    Transition,
+    VisualMode,
 )
-from .services import ffmpeg
+from .services import ffmpeg, parallax
 from .services.jamendo import ensure_downloaded, local_track_path
 from .storage import project_folder
 
@@ -231,6 +237,14 @@ def _content_style(session: Session, project: Project) -> str:
         return ""
     preset = session.get(ContentPreset, project.content_preset_id)
     return (preset.image_style_prompt if preset else "") or ""
+
+
+def _content_motion_style(session: Session, project: Project) -> str:
+    """The motion house style from the project's content preset (may be empty)."""
+    if not project.content_preset_id:
+        return ""
+    preset = session.get(ContentPreset, project.content_preset_id)
+    return (preset.motion_style_prompt if preset else "") or ""
 
 
 def _content_animation_style(session: Session, project: Project) -> str:
@@ -749,6 +763,8 @@ def generate_script(project_id: str) -> None:
         session.commit()
 
         enable_animations = bool(content and content.enable_animations)
+        panels_mode = bool(content and content.visual_mode == VisualMode.PANELS)
+        panel_seconds = (content.panel_seconds if content else 4.0) or 4.0
         try:
             gen = get_script_generator()
             user_prompt = prompts.build_script_prompt(
@@ -759,11 +775,13 @@ def generate_script(project_id: str) -> None:
                 enable_animations=enable_animations,
                 latex_available=_latex_available(),
                 revision_notes=project.revision_notes,
+                panels_mode=panels_mode,
+                panel_seconds=panel_seconds,
             )
             script = gen.generate(
                 prompts.CORE_SYSTEM_PROMPT,
                 user_prompt,
-                prompts.build_script_schema(enable_animations),
+                prompts.build_script_schema(enable_animations, panels_mode),
                 project.topic_prompt,
                 project.target_duration_seconds,
             )
@@ -847,6 +865,10 @@ def generate_script(project_id: str) -> None:
                     order_index=idx,
                     narration_text=s.narration_text,
                     image_prompt=s.image_prompt,
+                    motion_prompt=s.motion_prompt,
+                    camera_move=CameraMove(s.camera_move),
+                    particles=Particles(s.particles),
+                    transition=Transition(s.transition),
                     continuity_context=s.continuity_context,
                     scene_type=SceneType(s.scene_type),
                     animation_spec=s.animation,
@@ -1880,14 +1902,136 @@ def _apply_continuity_context(
     )
 
 
-def _build_clip_prompt(scene_prompt: str, element_refs: list[dict]) -> str:
-    prompt = (
-        "Animate the provided start image. Preserve the exact rendered style, "
-        "character appearances, props, environment, composition, and lighting from "
-        "the image; do not redesign the scene. Motion direction: "
-        f"{scene_prompt.strip()}"
+def _build_clip_prompt(
+    scene: Scene, motion_style: str = "", element_refs: list[dict] | None = None
+) -> str:
+    """The image-to-video prompt: motion, and nothing that describes the frame.
+
+    An i2v model already has the picture. Handing it a description of that same
+    picture — which is what ``image_prompt`` is — reads as "render this again",
+    and the model satisfies it the cheapest way there is: hold the frame and add
+    light effects. So the scene's ``motion_prompt`` is what goes in, the preamble
+    pins the DESIGN rather than the composition (pinning composition is close to
+    "do not move the camera"), and the group's motion house style follows.
+    """
+    motion = (scene.motion_prompt or "").strip()
+    if not motion:
+        # Scripts written before motion_prompt existed, or a cleared field. The
+        # camera move alone still beats re-describing the frame.
+        motion = _camera_phrase(scene.camera_move).capitalize() + "."
+    parts = [
+        "Animate the provided start image. Keep the rendered style, character "
+        "designs, costumes, props, environment and lighting exactly as they "
+        "already appear, and add nothing that is not already in the frame. The "
+        "framing may move; the artwork may not be redesigned or re-rendered.",
+        f"Motion: {motion}",
+    ]
+    motion_style = " ".join((motion_style or "").split())
+    if motion_style:
+        parts.append(f"House motion style: {_limit_prompt(motion_style, 900)}")
+    prompt = "\n\n".join(parts)
+    return _limit_prompt(
+        _apply_kling_element_context(prompt, element_refs or []),
+        _MAX_VIDEO_PROMPT_CHARS,
     )
-    return _limit_prompt(_apply_kling_element_context(prompt, element_refs), _MAX_VIDEO_PROMPT_CHARS)
+
+
+# Bumped whenever the panel renderer's output changes for the same inputs, so a
+# cached segment from an older version of the effects is not reused.
+_SEGMENT_RENDERER_VERSION = 3
+
+
+def _segment_key(
+    image: Path, duration: float, move: str, particles: str, transition: str,
+    parallax_on: bool, prev_token: str,
+) -> str:
+    """Identity of a rendered segment: same key means the same pixels.
+
+    ``prev_token`` is in here because a transition is rendered from the previous
+    panel's final frame — change the panel before this one and this segment's
+    opening genuinely differs, even though nothing about this scene moved.
+    """
+    stat = image.stat() if image.exists() else None
+    parts = [
+        str(_SEGMENT_RENDERER_VERSION), str(image), str(stat.st_mtime_ns if stat else 0),
+        str(stat.st_size if stat else 0), f"{duration:.3f}", move, particles,
+        transition, "P" if parallax_on else "F", prev_token,
+    ]
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()
+
+
+def _render_still_segment(
+    session, project: Project, scene: Scene, image: Path, out: Path,
+    duration: float, prev_clip: Path | None,
+) -> Path:
+    """One still panel as a video segment, cached, with its effect layers.
+
+    Falls back to the flat camera move on any failure rather than aborting the
+    render: a flatter panel is a far better outcome than a project that cannot
+    finish because a depth model misbehaved on one image.
+    """
+    move = getattr(scene.camera_move, "value", scene.camera_move) or "push_in"
+    particles = getattr(scene.particles, "value", scene.particles) or "none"
+    transition = getattr(scene.transition, "value", scene.transition) or "cut"
+
+    parallax_on = parallax.available()
+    if project.content_preset_id:
+        preset = session.get(ContentPreset, project.content_preset_id)
+        parallax_on = parallax_on and bool(preset and preset.panel_parallax)
+
+    # A transition only exists if there is a previous segment to arrive from.
+    prev_token = ""
+    if transition != "cut" and prev_clip and prev_clip.exists():
+        prev_stat = prev_clip.stat()
+        prev_token = f"{prev_stat.st_mtime_ns}:{prev_stat.st_size}"
+    else:
+        transition = "cut"
+
+    key = _segment_key(image, duration, move, particles, transition, parallax_on, prev_token)
+    key_file = out.with_suffix(".key")
+    if out.exists() and key_file.exists() and key_file.read_text(encoding="utf-8").strip() == key:
+        return out
+
+    needs_python_renderer = parallax_on or particles != "none" or transition != "cut"
+    if needs_python_renderer:
+        try:
+            prev_frame = (
+                parallax.last_frame(prev_clip) if transition != "cut" and prev_clip else None
+            )
+            parallax.parallax_clip(
+                image, out, duration, move,
+                particles=particles,
+                transition=transition if prev_frame is not None else "cut",
+                prev_frame=prev_frame,
+                use_depth=parallax_on,
+            )
+            key_file.write_text(key, encoding="utf-8")
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _set_msg(session, project, f"Effects unavailable for {image.name}; using a flat move")
+            print(f"panel effects failed for {image}: {exc}")
+
+    ffmpeg.ken_burns_clip(image, out, duration, move)
+    key_file.write_text(key, encoding="utf-8")
+    return out
+
+
+def _clip_duration(scene_seconds: float) -> float:
+    """How many seconds of video to actually generate for a scene.
+
+    Capped by ``settings.max_clip_seconds``: the tail of a long generation is
+    both the most expensive part and the part where the model has drifted
+    furthest from the frame it started with. The render covers the remainder of
+    the scene from the clip it has (services/ffmpeg._normalize_clip).
+    """
+    cap = settings.max_clip_seconds or 0
+    return min(scene_seconds, cap) if cap > 0 else scene_seconds
+
+
+def _camera_phrase(move) -> str:
+    """The camera move as plain language for a prompt."""
+    key = getattr(move, "value", move) or CameraMove.PUSH_IN.value
+    return CAMERA_MOVE_PHRASES.get(key, CAMERA_MOVE_PHRASES[CameraMove.PUSH_IN.value])
 
 
 def _apply_kling_element_context(prompt: str, element_refs: list[dict]) -> str:
@@ -2015,11 +2159,17 @@ def _generate_scene_clip_job(project_id: str, scene_id: str, force: bool = False
             return False
 
         image_abs = Path(settings.projects_dir.parent.parent) / scene.image_path
-        duration = scene.duration_seconds or 3.0
-        character_refs = _scene_character_refs(session, scene)
+        duration = _clip_duration(scene.duration_seconds or 3.0)
+        character_refs = (
+            _scene_character_refs(session, scene)
+            if settings.video_character_elements
+            else []
+        )
         element_limit = getattr(vid, "_MAX_ELEMENTS", len(character_refs))
         element_refs = character_refs[:element_limit]
-        prompt = _build_clip_prompt(scene.image_prompt, element_refs)
+        prompt = _build_clip_prompt(
+            scene, _content_motion_style(session, project), element_refs
+        )
         end_image = (
             _next_scene_image(session, project, scene)
             if scene.use_next_scene_as_end_frame
@@ -2155,7 +2305,10 @@ def render(project_id: str) -> None:
                     # Already an MP4 sized to the scene; normalize to WxH/fps like a clip.
                     ffmpeg._normalize_clip(root / scene.animation_path, seg, duration)
                 elif scene.image_path and (root / scene.image_path).exists():
-                    ffmpeg.ken_burns_clip(root / scene.image_path, seg, duration)
+                    _render_still_segment(
+                        session, project, scene, root / scene.image_path, seg,
+                        duration, segments[-1] if segments else None,
+                    )
                 else:
                     continue
                 segments.append(seg)

@@ -263,6 +263,10 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
     project_data["subtitle_position_default"] = SUBTITLE_POSITION_DEFAULT
     project_data["subtitle_position_min"] = SUBTITLE_POSITION_MIN
     project_data["subtitle_position_max"] = SUBTITLE_POSITION_MAX
+    # Surfaced so the storyboard can state what is actually sent to the video
+    # model rather than leaving the creator to guess from the code.
+    project_data["video_character_elements"] = settings.video_character_elements
+    project_data["max_clip_seconds"] = settings.max_clip_seconds
     project_data["voice_name"] = tts_voice_label(None)
     project_data["voice_id"] = ""
     if project.content_preset_id:
@@ -270,6 +274,8 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
         if content:
             project_data["content_preset_name"] = content.name
             project_data["visual_style_prompt"] = content.image_style_prompt
+            project_data["motion_style_prompt"] = content.motion_style_prompt
+            project_data["visual_mode"] = content.visual_mode
             project_data["voice_id"] = content.voice_id
             project_data["voice_name"] = tts_voice_label(content.voice_id)
     return ProjectDetail(

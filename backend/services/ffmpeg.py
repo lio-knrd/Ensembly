@@ -76,13 +76,80 @@ def _fade_bounds(duration: float, fade_in: float, fade_out: float) -> tuple[floa
 # --------------------------------------------------------------------------- #
 # Building blocks
 # --------------------------------------------------------------------------- #
-def ken_burns_clip(image_path: Path, out_path: Path, duration: float) -> Path:
-    """Still -> video segment with a slow zoom, sized to WxH at the given length."""
+# How far a push/pull travels, and the fixed zoom a pan or tilt sits at so there
+# is off-screen image left to travel across. 1.15 gives ~13% of the frame to
+# move through: clearly a camera move, never so much that the still goes soft.
+KEN_BURNS_ZOOM = 1.15
+# A pan or tilt starts a little tighter than it ends, so the frame creeps in
+# while it travels instead of sliding at a fixed scale.
+PAN_ZOOM_START, PAN_ZOOM_TRAVEL = 1.12, 0.08
+# How far the impact move drives in. Bigger than a push on purpose — it is
+# meant to land, not to drift.
+PUNCH_ZOOM = 1.30
+
+# How far a generated clip may be slowed to cover its scene before the rest is
+# held on the final frame instead. Past roughly a third slower, gestures start
+# reading as sludge rather than as deliberate pacing.
+_MAX_STRETCH = 1.35
+
+
+def _ken_burns_expressions(move: str, frames: int) -> tuple[str, str, str]:
+    """(zoom, x, y) zoompan expressions for one camera move.
+
+    ``on`` is the output frame index, so the ramp goes 0 -> 1 across the segment
+    and every move lands exactly on its end point regardless of length.
+
+    Two rules constrain how these are written. No expression may contain a
+    comma, because zoompan is one filter in a comma-separated chain — which
+    rules out ``min()``, ``pow()`` and ``if()``, so every curve below is built
+    from plain multiplication. And the ramps are eased rather than linear: a
+    constant-speed camera move is the thing that reads as "slideshow", while
+    the same move with acceleration and settle reads as a decision.
+    """
+    span = max(1, frames - 1)
+    t = f"(on/{span})"
+    # Smoothstep: starts slow, accelerates, settles. The default for travel.
+    ease = f"({t}*{t}*(3-2*{t}))"
+    # Quartic ease-out: almost all of the movement happens immediately, then it
+    # holds. This is the impact curve, not a camera drift.
+    snap = f"(1-(1-{t})*(1-{t})*(1-{t})*(1-{t}))"
+    center_x, center_y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    # Full width/height left over at this zoom — how far a pan or tilt can go.
+    span_x, span_y = "(iw-iw/zoom)", "(ih-ih/zoom)"
+    travel = KEN_BURNS_ZOOM - 1.0
+    z = f"{KEN_BURNS_ZOOM:.4f}"
+    # Pans and tilts creep in slightly while they travel. A sideways move at a
+    # locked zoom looks like a photo on a slider; the drift sells it as a camera.
+    pan_z = f"{PAN_ZOOM_START:.4f}+{PAN_ZOOM_TRAVEL:.4f}*{ease}"
+    return {
+        # Chosen when stillness is the point, so it really does hold.
+        "static": ("1", "0", "0"),
+        "push_in": (f"1+{travel:.4f}*{ease}", center_x, center_y),
+        "pull_out": (f"{z}-{travel:.4f}*{ease}", center_x, center_y),
+        "pan_left": (pan_z, f"{span_x}*(1-{ease})", center_y),
+        "pan_right": (pan_z, f"{span_x}*{ease}", center_y),
+        "tilt_up": (pan_z, center_x, f"{span_y}*(1-{ease})"),
+        "tilt_down": (pan_z, center_x, f"{span_y}*{ease}"),
+        "punch_in": (f"1+{PUNCH_ZOOM - 1.0:.4f}*{snap}", center_x, center_y),
+    }.get(move, (f"1+{travel:.4f}*{ease}", center_x, center_y))
+
+
+def ken_burns_clip(
+    image_path: Path, out_path: Path, duration: float, move: str = "push_in"
+) -> Path:
+    """Still -> video segment with a real camera move, at the scene's duration.
+
+    ``move`` is a ``models.CameraMove`` value. On a still-heavy video this is the
+    only motion the viewer sees, so it is chosen per scene rather than fixed —
+    ten scenes sharing one slow zoom is what makes a storyboard read as a
+    slideshow.
+    """
     frames = max(1, int(round(duration * FPS)))
+    z, x, y = _ken_burns_expressions(str(move), frames)
     vf = (
         f"scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,"
         f"crop={W * 2}:{H * 2},"
-        f"zoompan=z='min(zoom+0.0006,1.15)':d={frames}:s={W}x{H}:fps={FPS},"
+        f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={FPS},"
         f"format=yuv420p"
     )
     _run([
@@ -94,12 +161,30 @@ def ken_burns_clip(image_path: Path, out_path: Path, duration: float) -> Path:
 
 
 def _normalize_clip(clip_path: Path, out_path: Path, duration: float) -> Path:
-    """Existing motion clip -> WxH, trimmed or frozen on its final frame."""
+    """Existing motion clip -> WxH, covering the scene's full audio duration.
+
+    A generated clip is often shorter than its scene, because generation is
+    billed by the second and the back half of a long clip is where an i2v model
+    drifts off the art direction. The gap is closed in the order that looks the
+    least like a mistake: a modest slowdown first, which keeps real motion
+    running for longer, and a held final frame only for whatever is still
+    missing past ``_MAX_STRETCH``.
+    """
     clip_duration = _probe_duration(clip_path)
-    pad = max(0.0, duration - clip_duration) if clip_duration > 0 else duration
+    if clip_duration <= 0:
+        clip_duration = duration
+    stretch = duration / clip_duration if clip_duration > 0 else 1.0
+    # Slow to the cap (1.0 = untouched), then hold whatever is still missing.
+    speed = min(max(stretch, 1.0), _MAX_STRETCH)
+    pad = max(0.0, duration - clip_duration * speed)
+    # setpts must come BEFORE fps: stretching timestamps after the frame rate is
+    # fixed leaves the segment at a fraction of FPS, and every segment has to
+    # share one cadence for the concat to hold sync.
     vf = (
         f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-        f"crop={W}:{H},fps={FPS},"
+        f"crop={W}:{H},"
+        f"setpts={speed:.5f}*PTS,"
+        f"fps={FPS},"
         f"tpad=stop_mode=clone:stop_duration={pad:.3f},"
         f"format=yuv420p"
     )
