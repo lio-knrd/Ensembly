@@ -345,10 +345,10 @@ class ContentPreset(SQLModel, table=True):
     # panels for the same runtime, which is what makes it read like a manhwa
     # page rather than a slideshow. Ignored in MIXED mode.
     panel_seconds: float = 4.0
-    # Depth-based 2.5D parallax over each still at render time. Costs roughly
-    # 7x realtime on CPU, so it is a per-group choice rather than always-on, and
-    # it silently falls back to the flat camera move when the depth model is not
-    # installed (see services/parallax.available).
+    # Depth-based 2.5D parallax for dolly-style push/pull moves at render time.
+    # Pans, tilts and editorial punch-ins stay coherent flat-image transforms.
+    # Depth costs roughly 7x realtime on CPU, so it is a per-group choice, and
+    # silently falls back when the model is unavailable (see parallax.available).
     panel_parallax: bool = True
     voice_id: str = ""
     # When on, the script LLM may mark scenes as deterministic animations and

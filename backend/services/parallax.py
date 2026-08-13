@@ -1,20 +1,16 @@
-"""Depth-based 2.5D parallax over a still panel.
+"""Depth-based 2.5D parallax for dolly moves over a still panel.
 
-A camera move applied uniformly to a flat image is honest but flat: everything
-in the frame travels at the same rate, which is exactly what a photograph on a
-slider looks like. Real depth means near things sweep past faster than far
-things, and that difference is most of what sells a still as a shot.
+Parallax is a cue from camera translation, not from motion alone. Push-ins and
+pull-outs approximate a camera travelling through the scene, so near and far
+points should move at different rates. Pans and tilts approximate rotation
+about the camera centre; punch-ins are editorial/optical zooms. Those moves
+must keep the whole photograph coherent and therefore stay flat.
 
-The panel is warped continuously: every point is displaced by an amount that
-depends on its own estimated depth, near points furthest. This is done as a
-single mesh transform, so each source pixel lands in exactly one place.
-
-An earlier version of this module composited discrete depth layers on top of an
-un-masked copy of the panel. That duplicates content — when the near layer
-moves, the original of that content is still underneath at its old position, so
-a face or a pair of hands visibly doubles. A continuous warp cannot do that.
-Its own failure mode is mild stretching across sharp depth edges, which reads
-as depth of field rather than as a mistake.
+The panel is transformed through an edge-guided depth mesh. Near and far points
+receive deliberately different camera gains, while a guided filter flattens
+uncertain depth within surfaces and aligns changes with artwork edges. This is
+strong enough to read as 2.5D without the hard seams produced by automatic
+foreground/midground cutouts.
 
 Depth comes from Depth Anything V2 Small via onnxruntime. Both the runtime and
 the weights are optional, exactly like the manim engine: ``available()`` is
@@ -52,23 +48,23 @@ _PARTICLE_KINDS: dict[str, tuple[int, tuple[int, int], tuple[int, int, int], flo
 # it is an arrival, not a scene of its own.
 _TRANSITION_SECONDS = 0.32
 
-# Depth Anything V2 Small. 518 is the resolution it was exported at; the model
-# is fully convolutional but off-size inputs cost accuracy for no benefit here.
+# Depth Anything V2 Small. The official preprocessing keeps the input aspect
+# ratio, makes both dimensions at least 518, and rounds them to a multiple of
+# the ViT patch size (14). Squashing a portrait panel into 518x518 changes what
+# the model thinks a person and a room look like, even if the depth map is later
+# stretched back to portrait.
 _MODEL_NAME = "depth_anything_v2_small.onnx"
 _INPUT_SIZE = 518
+_PATCH_SIZE = 14
+_DEPTH_CACHE_VERSION = 2
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-# How much of the camera move the furthest and nearest points take. The spread
-# between them IS the effect; keeping it modest is what keeps the warp from
-# tearing across depth edges.
-_GAIN_FAR, _GAIN_NEAR = 0.86, 1.22
-# Warp mesh resolution. Fine enough to follow a subject's outline, coarse enough
-# that building the mesh is not itself the cost.
-_MESH_COLS, _MESH_ROWS = 32, 56
-# The depth map is smoothed before use: raw per-pixel depth on stylised art is
-# noisy, and noise in a displacement field shows up as shimmer.
-_DEPTH_BLUR = 6.0
+# Near/far camera gains are far enough apart to be perceptible in motion. The
+# guided depth preparation below is what keeps that stronger field coherent.
+_GAIN_FAR, _GAIN_NEAR = 0.70, 1.30
+_MESH_COLS, _MESH_ROWS = 40, 72
+_DEPTH_CAMERA_MOVES = frozenset({"push_in", "pull_out"})
 
 _session = None
 
@@ -86,6 +82,12 @@ def available() -> bool:
     return model_path().exists()
 
 
+def uses_depth(move: str) -> bool:
+    """Whether a named move represents camera translation through the scene."""
+    key = getattr(move, "value", move)
+    return key in _DEPTH_CAMERA_MOVES
+
+
 def _get_session():
     global _session
     if _session is None:
@@ -100,13 +102,31 @@ def _get_session():
     return _session
 
 
+def _inference_size(size: tuple[int, int]) -> tuple[int, int]:
+    """Depth Anything V2's aspect-preserving ``lower_bound`` resize.
+
+    Returns ``(width, height)``. Both dimensions are at least 518 and divisible
+    by 14, matching the preprocessing in the model's official implementation.
+    """
+    width, height = size
+    scale = max(_INPUT_SIZE / max(1, width), _INPUT_SIZE / max(1, height))
+
+    def lower_bound(value: float) -> int:
+        rounded = int(round(value / _PATCH_SIZE) * _PATCH_SIZE)
+        if rounded < _INPUT_SIZE:
+            rounded = int(math.ceil(value / _PATCH_SIZE) * _PATCH_SIZE)
+        return max(_PATCH_SIZE, rounded)
+
+    return lower_bound(width * scale), lower_bound(height * scale)
+
+
 def depth_map(image_path: Path, cache: bool = True) -> np.ndarray:
     """Normalised depth for a panel, 1.0 nearest and 0.0 furthest.
 
     Cached beside the image, because the same panel is re-rendered every time
     the project is re-rendered and the depth never changes.
     """
-    cache_file = Path(image_path).with_suffix(".depth.npy")
+    cache_file = Path(image_path).with_suffix(f".depth-v{_DEPTH_CACHE_VERSION}.npy")
     if cache and cache_file.exists():
         try:
             return np.load(cache_file)
@@ -114,13 +134,16 @@ def depth_map(image_path: Path, cache: bool = True) -> np.ndarray:
             pass
 
     session = _get_session()
-    image = Image.open(image_path).convert("RGB").resize((_INPUT_SIZE, _INPUT_SIZE), Image.BILINEAR)
+    image = Image.open(image_path).convert("RGB")
+    image = image.resize(_inference_size(image.size), Image.BICUBIC)
     x = np.asarray(image, dtype=np.float32) / 255.0
     x = ((x - _IMAGENET_MEAN) / _IMAGENET_STD).transpose(2, 0, 1)[None]
     raw = session.run(None, {session.get_inputs()[0].name: x})[0][0]
 
-    lo, hi = float(raw.min()), float(raw.max())
-    depth = (raw - lo) / (hi - lo) if hi > lo else np.zeros_like(raw)
+    # Relative monocular depth has arbitrary scale and shift. Robust percentiles
+    # stop one bad border pixel from flattening the useful depth range.
+    lo, hi = np.percentile(raw, (2.0, 98.0))
+    depth = np.clip((raw - lo) / (hi - lo), 0.0, 1.0) if hi > lo else np.zeros_like(raw)
     depth = depth.astype(np.float32)
     if cache:
         try:
@@ -130,16 +153,51 @@ def depth_map(image_path: Path, cache: bool = True) -> np.ndarray:
     return depth
 
 
-def _mesh_depth(depth: np.ndarray) -> np.ndarray:
-    """Depth sampled at the warp mesh's vertices, smoothed and rescaled 0..1."""
-    smoothed = Image.fromarray((depth * 255).astype(np.uint8)).filter(
-        ImageFilter.GaussianBlur(_DEPTH_BLUR)
-    ).resize((_MESH_COLS + 1, _MESH_ROWS + 1), Image.BILINEAR)
-    d = np.asarray(smoothed, dtype=np.float32) / 255.0
-    # Stretch to the full range so a panel whose depth all sits in a narrow band
-    # still gets the whole parallax spread rather than none of it.
-    lo, hi = float(d.min()), float(d.max())
-    return (d - lo) / (hi - lo) if hi - lo > 1e-3 else np.full_like(d, 0.5)
+def _render_depth(depth: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """A full-resolution, artwork-aligned relative-depth image for rendering."""
+    image = _cover(Image.fromarray((depth * 255).astype(np.uint8)), size)
+    image = image.filter(ImageFilter.MedianFilter(5)).filter(
+        ImageFilter.GaussianBlur(max(1.0, size[0] / W * 1.8))
+    )
+    values = np.asarray(image, dtype=np.float32) / 255.0
+    lo, hi = np.percentile(values, (2.0, 98.0))
+    if hi - lo <= 1e-3:
+        return np.zeros_like(values)
+    return np.clip((values - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _guided_mesh_depth(
+    panel: Image.Image, depth: np.ndarray, size: tuple[int, int]
+) -> np.ndarray:
+    """Edge-guided, surface-smoothed depth sampled at mesh vertices.
+
+    A guided filter flattens uncertain depth within similarly coloured surfaces
+    but allows the field to change at artwork edges. This substantially reduces
+    the rubber-sheet look of a raw depth warp without introducing the hard seams
+    of automatic foreground/midground cutouts.
+    """
+    from scipy import ndimage
+
+    p = _render_depth(depth, size)
+    guidance = np.asarray(panel.convert("L"), dtype=np.float32) / 255.0
+    radius = max(4, round(size[0] / W * 18))
+    window = radius * 2 + 1
+    mean_i = ndimage.uniform_filter(guidance, window, mode="reflect")
+    mean_p = ndimage.uniform_filter(p, window, mode="reflect")
+    corr_i = ndimage.uniform_filter(guidance * guidance, window, mode="reflect")
+    corr_ip = ndimage.uniform_filter(guidance * p, window, mode="reflect")
+    var_i = corr_i - mean_i * mean_i
+    cov_ip = corr_ip - mean_i * mean_p
+    a = cov_ip / (var_i + 0.02)
+    b = mean_p - a * mean_i
+    q = ndimage.uniform_filter(a, window, mode="reflect") * guidance
+    q += ndimage.uniform_filter(b, window, mode="reflect")
+    q = np.clip(q, 0.0, 1.0)
+    q = q * q * (3.0 - 2.0 * q)
+    mesh = Image.fromarray(np.round(q * 255).astype(np.uint8), "L").resize(
+        (_MESH_COLS + 1, _MESH_ROWS + 1), Image.BILINEAR
+    )
+    return np.asarray(mesh, dtype=np.float32) / 255.0
 
 
 def _cover(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -187,19 +245,22 @@ def _particle_field(kind: str, seed: str, size: tuple[int, int]) -> list[dict]:
     count, (r_lo, r_hi), color, fall, sway, sway_hz, alpha = spec
     rng = random.Random(hashlib.sha1(f"{kind}:{seed}".encode()).hexdigest())
     width, height = size
+    scale = width / W
     field = []
     for _ in range(count):
-        radius = rng.uniform(r_lo, r_hi)
+        base_radius = rng.uniform(r_lo, r_hi)
+        radius = base_radius * scale
         # Bigger motes read as nearer, so they fall faster and fade less.
-        nearness = (radius - r_lo) / max(1e-6, r_hi - r_lo)
+        nearness = (base_radius - r_lo) / max(1e-6, r_hi - r_lo)
         field.append({
+            "kind": kind,
             "x": rng.uniform(-0.05, 1.05) * width,
             "y": rng.uniform(-0.15, 1.15) * height,
             "r": radius,
             "color": color,
             "alpha": int(alpha * rng.uniform(0.45, 1.0)),
-            "fall": fall * (0.65 + 0.7 * nearness),
-            "sway": sway * rng.uniform(0.4, 1.3),
+            "fall": fall * scale * (0.65 + 0.7 * nearness),
+            "sway": sway * scale * rng.uniform(0.4, 1.3),
             "hz": sway_hz * rng.uniform(0.7, 1.4),
             "phase": rng.uniform(0, math.tau),
         })
@@ -209,13 +270,14 @@ def _particle_field(kind: str, seed: str, size: tuple[int, int]) -> list[dict]:
 def _draw_particles(field: list[dict], t: float, size: tuple[int, int]) -> Image.Image:
     """The particle layer at time ``t`` seconds.
 
-    Screen space, drawn over the finished frame. Depth separation comes from
-    size and speed — bigger, faster motes read as nearer — rather than from
-    occluding the subject, which the continuous warp has no layers to do.
+    Screen space, drawn over the finished frame. Size and speed provide another
+    depth cue: bigger, faster motes read as nearer than the warped artwork.
     """
     width, height = size
     layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    haze = Image.new("RGBA", size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
+    haze_draw = ImageDraw.Draw(haze)
     for p in field:
         y = p["y"] + p["fall"] * t
         # Wrap with a margin so nothing pops in at the frame edge.
@@ -223,8 +285,41 @@ def _draw_particles(field: list[dict], t: float, size: tuple[int, int]) -> Image
         y = ((y + height * 0.15) % span) - height * 0.15
         x = p["x"] + p["sway"] * math.sin(math.tau * p["hz"] * t + p["phase"])
         r = p["r"]
-        draw.ellipse((x - r, y - r, x + r, y + r), fill=(*p["color"], p["alpha"]))
-    return layer
+        color, alpha = p["color"], p["alpha"]
+        # Soft translucent billboards read as atmospheric volume. The previous
+        # opaque circles looked like interface dots pasted over the artwork.
+        haze_draw.ellipse(
+            (x - r * 1.8, y - r * 1.8, x + r * 1.8, y + r * 1.8),
+            fill=(*color, max(1, alpha // 3)),
+        )
+        if p["kind"] == "embers":  # a short bright core along their motion
+            tail = max(2.0, r * 2.4)
+            draw.line(
+                (x, y + tail, x, y - r * 0.4),
+                fill=(*color, alpha), width=max(1, round(r * 0.7)),
+            )
+            draw.ellipse(
+                (x - r * 0.45, y - r * 0.45, x + r * 0.45, y + r * 0.45),
+                fill=(255, 226, 150, min(255, alpha + 20)),
+            )
+        elif p["kind"] == "petals":
+            angle = p["phase"] + math.tau * 0.18 * t
+            ux, uy = math.cos(angle), math.sin(angle)
+            vx, vy = -uy * 0.38, ux * 0.38
+            draw.polygon([
+                (x + ux * r, y + uy * r),
+                (x + vx * r, y + vy * r),
+                (x - ux * r, y - uy * r),
+                (x - vx * r, y - vy * r),
+            ], fill=(*color, max(1, int(alpha * 0.7))))
+        else:
+            draw.ellipse(
+                (x - r * 0.55, y - r * 0.55, x + r * 0.55, y + r * 0.55),
+                fill=(*color, max(1, alpha // 2)),
+            )
+    haze = haze.filter(ImageFilter.GaussianBlur(max(0.7, size[0] / W * 2.2)))
+    haze.alpha_composite(layer)
+    return haze
 
 
 def _apply_transition(
@@ -273,22 +368,25 @@ def parallax_clip(
     """Render one panel as a shot and encode it to ``out_path``.
 
     Three independent layers, any combination of which may be active: the camera
-    move, depth parallax on top of it, and a particle overlay on top of that.
+    move, eligible depth parallax on top of it, and a particle overlay on top.
     ``transition`` blends the opening frames out of ``prev_frame`` — inside this
     panel's own duration, so the caption timeline never shifts.
 
-    Raises if depth was asked for and is unavailable, so the caller can fall
+    Depth is only eligible for push/pull dolly moves. A pan, tilt, static frame,
+    or punch-in stays flat even when ``use_depth`` is true. Raises if depth was
+    requested for an eligible move and is unavailable, so the caller can fall
     back rather than silently producing a flat clip that claims to be parallax.
     """
-    depth_on = use_depth and available()
-    if use_depth and not depth_on:
+    depth_requested = use_depth and uses_depth(move)
+    depth_on = depth_requested and available()
+    if depth_requested and not depth_on:
         raise RuntimeError("depth model unavailable")
 
     width, height = size
     frames = max(1, int(round(duration * FPS)))
     panel = _cover(Image.open(image_path).convert("RGB"), size)
 
-    mesh_depth = _mesh_depth(depth_map(image_path)) if depth_on else None
+    mesh_depth = _guided_mesh_depth(panel, depth_map(image_path), size) if depth_on else None
     field = _particle_field(particles, str(image_path), size)
     transition_frames = (
         min(frames, max(1, int(round(_TRANSITION_SECONDS * FPS))))
@@ -346,12 +444,7 @@ def last_frame(clip_path: Path, size: tuple[int, int] = (W, H)) -> Image.Image |
 
 def _warp(panel: Image.Image, mesh_depth: np.ndarray, zoom: float, fx: float,
           fy: float, size: tuple[int, int]) -> Image.Image:
-    """The panel under a depth-dependent camera move, as one mesh transform.
-
-    Each mesh vertex is mapped by exactly the rule in ``_place``, but with its
-    own gain taken from its own depth — so the mapping is continuous in depth
-    and no part of the image is ever drawn twice.
-    """
+    """Apply one continuous, edge-guided depth camera transform."""
     width, height = size
     gains = _GAIN_FAR + (_GAIN_NEAR - _GAIN_FAR) * mesh_depth
     z = np.maximum(1.0, 1.0 + (zoom - 1.0) * gains)
@@ -362,22 +455,19 @@ def _warp(panel: Image.Image, mesh_depth: np.ndarray, zoom: float, fx: float,
 
     xs = np.linspace(0, width, _MESH_COLS + 1)
     ys = np.linspace(0, height, _MESH_ROWS + 1)
-    # Source coordinate for every mesh vertex.
     src_x = xs[None, :] / z + left
     src_y = ys[:, None] / z + top
-
     mesh = []
-    for r in range(_MESH_ROWS):
-        for c in range(_MESH_COLS):
-            box = (int(xs[c]), int(ys[r]), int(xs[c + 1]), int(ys[r + 1]))
-            # PIL wants the source quad as NW, SW, SE, NE.
+    for row in range(_MESH_ROWS):
+        for col in range(_MESH_COLS):
+            box = (int(xs[col]), int(ys[row]), int(xs[col + 1]), int(ys[row + 1]))
             mesh.append((box, (
-                src_x[r, c], src_y[r, c],
-                src_x[r + 1, c], src_y[r + 1, c],
-                src_x[r + 1, c + 1], src_y[r + 1, c + 1],
-                src_x[r, c + 1], src_y[r, c + 1],
+                src_x[row, col], src_y[row, col],
+                src_x[row + 1, col], src_y[row + 1, col],
+                src_x[row + 1, col + 1], src_y[row + 1, col + 1],
+                src_x[row, col + 1], src_y[row, col + 1],
             )))
-    return panel.transform(size, Image.MESH, mesh, resample=Image.BILINEAR)
+    return panel.transform(size, Image.MESH, mesh, resample=Image.BICUBIC)
 
 
 def _place(rgba: Image.Image, zoom: float, fx: float, fy: float, gain: float,

@@ -786,14 +786,14 @@ function PresetEditor({
                   checked={panelParallax}
                   onChange={(e) => setPanelParallax(e.target.checked)}
                 />
-                Estimate depth for each panel and move near and far parts of the
-                image at different rates, so the camera move reads as
-                dimensional instead of flat.
+                Estimate depth for push-ins and pull-outs, moving near and far
+                parts at different rates so those dolly moves read as
+                dimensional. Pans, tilts, and punch-ins stay flat and coherent.
               </label>
               <div className="style-assistant-note">
-                Adds roughly 25 seconds of render time per panel and runs
-                entirely on this machine. Turn it off for faster renders; panels
-                then use the plain camera move.
+                Adds roughly 25 seconds for each eligible push/pull panel and
+                runs entirely on this machine. Turn it off for faster renders;
+                those panels then use the plain camera move.
               </div>
             </>
           )}

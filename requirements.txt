@@ -16,6 +16,8 @@ httpx==0.28.1
 
 # Media placeholder generation (offline fallback for images)
 Pillow==11.1.0
+# Edge-guided smoothing for the 2.5D depth field.
+scipy>=1.14,<2
 
 # Optional provider SDKs (imported lazily; app runs without them).
 # 0.116+ is required for the `output_config` structured-output parameter used

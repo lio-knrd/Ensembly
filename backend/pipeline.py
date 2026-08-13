@@ -1938,7 +1938,7 @@ def _build_clip_prompt(
 
 # Bumped whenever the panel renderer's output changes for the same inputs, so a
 # cached segment from an older version of the effects is not reused.
-_SEGMENT_RENDERER_VERSION = 3
+_SEGMENT_RENDERER_VERSION = 6
 
 
 def _segment_key(
@@ -1974,7 +1974,10 @@ def _render_still_segment(
     particles = getattr(scene.particles, "value", scene.particles) or "none"
     transition = getattr(scene.transition, "value", scene.transition) or "cut"
 
-    parallax_on = parallax.available()
+    # Depth parallax belongs to camera translation, not to every moving frame.
+    # Pans/tilts are rotations and punch-in is an editorial zoom, so they use
+    # the coherent flat renderer. Push/pull are the only dolly-style moves.
+    parallax_on = parallax.available() and parallax.uses_depth(move)
     if project.content_preset_id:
         preset = session.get(ContentPreset, project.content_preset_id)
         parallax_on = parallax_on and bool(preset and preset.panel_parallax)
