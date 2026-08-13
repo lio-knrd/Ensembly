@@ -15,6 +15,9 @@ venv/
 /data/music/*
 !/data/music/whisper-in-the-deep.mp3
 
+# Local render/review outputs. These must never be committed.
+/artifacts/
+
 # Node / frontend
 frontend/node_modules/
 frontend/dist/
