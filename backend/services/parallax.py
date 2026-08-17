@@ -25,7 +25,7 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from ..config import settings
 
@@ -47,6 +47,202 @@ _PARTICLE_KINDS: dict[str, tuple[int, tuple[int, int], tuple[int, int, int], flo
 # How long a transition takes, as a share of the incoming panel. Kept short:
 # it is an arrival, not a scene of its own.
 _TRANSITION_SECONDS = 0.32
+
+# --------------------------------------------------------------------------- #
+# Motion effects
+# --------------------------------------------------------------------------- #
+# All three are impact effects rather than atmosphere: they hit at the top of a
+# panel and are gone well before it ends, because a panel that keeps shaking or
+# keeps streaking stops reading as a hit and starts reading as a filter. That
+# also means they cost only a few frames of work each.
+_SHAKE_SECONDS = 0.34
+_SHAKE_HZ = 23.0
+# Extra zoom the shake needs so translating never exposes the canvas edge. _place
+# clamps its travel to the slack the zoom leaves, so with no headroom a shake at
+# zoom 1.0 would simply do nothing.
+_SHAKE_ZOOM = 1.035
+_SHAKE_TRAVEL = 0.38  # share of that slack, per axis, at full strength
+
+_SPEED_LINE_SECONDS = 0.55
+_SPEED_LINE_COUNT = 120
+
+_MOTION_BLUR_SECONDS = 0.42
+_MOTION_BLUR_SAMPLES = 6
+_MOTION_BLUR_PIXELS = 34.0
+
+# --------------------------------------------------------------------------- #
+# Colour grades
+# --------------------------------------------------------------------------- #
+# (saturation, per-channel gain, per-channel lift, contrast). Deliberately
+# gentle: the artwork already carries a palette from the style preset, and a
+# grade is meant to bend it toward a feeling, not repaint it. "memory" is the
+# strong one because a flashback has to read as a different time at a glance.
+_GRADES: dict[str, tuple[float, tuple[float, float, float], tuple[int, int, int], float]] = {
+    "warm":      (1.06, (1.10, 1.02, 0.90), (10, 2, -6), 1.03),
+    "cold":      (0.94, (0.90, 0.98, 1.14), (-6, 0, 10), 1.03),
+    "blood":     (0.70, (1.22, 0.78, 0.74), (12, -6, -8), 1.08),
+    "moonlight": (0.60, (0.80, 0.90, 1.20), (-4, 2, 14), 0.98),
+    "memory":    (0.32, (1.14, 1.02, 0.82), (14, 6, -10), 0.95),
+}
+
+
+def _graded(panel: Image.Image, grade: str) -> Image.Image:
+    """``panel`` pushed toward a mood.
+
+    Applied once to the source artwork rather than per frame: a grade is a
+    per-pixel transform, so doing it before the camera move costs one pass
+    instead of one per frame, and it leaves the drawn layers alone — speed lines
+    and snow are light in the room, not paint on the picture, so they should not
+    take the tint.
+    """
+    spec = _GRADES.get(grade)
+    if spec is None:
+        return panel
+    saturation, gains, lifts, contrast = spec
+    out = ImageEnhance.Color(panel).enhance(saturation)
+    if contrast != 1.0:
+        out = ImageEnhance.Contrast(out).enhance(contrast)
+    table: list[int] = []
+    for gain, lift in zip(gains, lifts):
+        table.extend(
+            min(255, max(0, int(round(value * gain + lift)))) for value in range(256)
+        )
+    return out.point(table)
+
+
+def _shake_at(camera: tuple[float, float, float], t: float) -> tuple[float, float, float]:
+    """``camera`` displaced by a decaying two-axis oscillation.
+
+    Two things have to hold or the shake reads as a glitch rather than a hit.
+    The zoom headroom decays on the same envelope as the travel, because a
+    constant headroom that switches off when the shake ends is a visible pop
+    back to the true framing. And both axes start at zero, so the panel opens on
+    its real composition and swings out of it; an axis driven by a cosine is at
+    full displacement on the first frame, which reads as a misaligned cut.
+
+    The travel below is a share of the slack the zoom leaves, and that slack is
+    itself shrinking with the envelope, so the displacement in pixels falls away
+    smoothly to nothing without a second decay term.
+    """
+    if t >= _SHAKE_SECONDS:
+        return camera
+    zoom, fx, fy = camera
+    envelope = (1.0 - t / _SHAKE_SECONDS) ** 2
+    phase = t * _SHAKE_HZ * math.tau
+    return (
+        max(zoom, 1.0) * (1.0 + (_SHAKE_ZOOM - 1.0) * envelope),
+        fx + math.sin(phase) * _SHAKE_TRAVEL,
+        # A different frequency per axis, or the two sum into one diagonal jolt.
+        fy + math.sin(phase * 1.37) * _SHAKE_TRAVEL,
+    )
+
+
+def _speed_line_field(seed: str, size: tuple[int, int]) -> list[dict]:
+    """Radial impact lines, laid out once and seeded like the particle field."""
+    rng = random.Random(f"speed:{seed}")
+    return [
+        {
+            "angle": rng.uniform(0.0, math.tau),
+            "start": rng.uniform(0.26, 0.60),
+            "half_width": rng.uniform(0.0035, 0.0130),
+            "alpha": rng.uniform(0.40, 1.0),
+        }
+        for _ in range(_SPEED_LINE_COUNT)
+    ]
+
+
+def _draw_speed_lines(field: list[dict], t: float, size: tuple[int, int]) -> Image.Image | None:
+    """Tapered wedges converging on the frame centre, retreating as they fade.
+
+    Each wedge is drawn twice, a wider near-black one under a white one, so the
+    lines stay legible over a bright sky and a black cave alike.
+    """
+    if t >= _SPEED_LINE_SECONDS:
+        return None
+    width, height = size
+    progress = t / _SPEED_LINE_SECONDS
+    # Quick attack so the first frame already carries the hit, then a long tail.
+    strength = min(1.0, progress / 0.12) * (1.0 - progress) ** 1.6
+    if strength <= 0.01:
+        return None
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    cx, cy = width / 2.0, height / 2.0
+    # Centre to corner, not the full diagonal: the radii below are measured from
+    # the middle of the frame, so a full-diagonal reach puts the near end of
+    # every line outside the picture and draws almost nothing.
+    reach = math.hypot(cx, cy)
+    for line in field:
+        # The inner end retreats toward the edge as the panel settles.
+        inner = line["start"] + (1.0 - line["start"]) * (progress ** 0.7)
+        if inner >= 0.99:
+            continue
+        angle = line["angle"]
+        for spread, colour in (
+            (line["half_width"] * 2.1, (8, 8, 10)),
+            (line["half_width"], (255, 255, 255)),
+        ):
+            points = [
+                (cx + math.cos(angle + d) * reach * inner,
+                 cy + math.sin(angle + d) * reach * inner)
+                for d in (-spread * 0.35, spread * 0.35)
+            ] + [
+                (cx + math.cos(angle + d) * reach,
+                 cy + math.sin(angle + d) * reach)
+                for d in (spread, -spread)
+            ]
+            alpha = int(round(255 * line["alpha"] * strength * (0.7 if colour[0] < 20 else 1.0)))
+            if alpha > 0:
+                draw.polygon(points, fill=(*colour, alpha))
+    return overlay
+
+
+def _blur_direction(move: str) -> tuple[float, float] | None:
+    """Which way a move smears, or None for the moves that smear radially."""
+    return {
+        "pan_left": (1.0, 0.0),
+        "pan_right": (-1.0, 0.0),
+        "tilt_up": (0.0, 1.0),
+        "tilt_down": (0.0, -1.0),
+    }.get(move)
+
+
+def _motion_blur(frame: Image.Image, move: str, t: float) -> Image.Image:
+    """The frame smeared along its own camera move, decaying as it settles.
+
+    Averaged offset copies rather than a gaussian: a gaussian blurs a frame
+    evenly and reads as out of focus, while the streak that reads as speed is
+    directional and only ever along the axis the camera is travelling.
+    """
+    if t >= _MOTION_BLUR_SECONDS:
+        return frame
+    strength = (1.0 - t / _MOTION_BLUR_SECONDS) ** 1.5
+    if strength <= 0.02:
+        return frame
+    direction = _blur_direction(move)
+    accumulated = frame
+    for step in range(1, _MOTION_BLUR_SAMPLES + 1):
+        share = step / _MOTION_BLUR_SAMPLES
+        if direction is None:
+            # Dollies and punches smear outward from the centre, so the copies
+            # are scaled about it rather than shifted.
+            scale = 1.0 + 0.028 * strength * share
+            wide = frame.resize(
+                (max(1, int(frame.width * scale)), max(1, int(frame.height * scale))),
+                Image.BILINEAR,
+            )
+            left = (wide.width - frame.width) // 2
+            top = (wide.height - frame.height) // 2
+            sample = wide.crop((left, top, left + frame.width, top + frame.height))
+        else:
+            offset = _MOTION_BLUR_PIXELS * strength * share
+            sample = frame.transform(
+                frame.size, Image.AFFINE,
+                (1, 0, direction[0] * offset, 0, 1, direction[1] * offset),
+                resample=Image.BILINEAR,
+            )
+        accumulated = Image.blend(accumulated, sample, 1.0 / (step + 1))
+    return accumulated
 
 # Depth Anything V2 Small. The official preprocessing keeps the input aspect
 # ratio, makes both dimensions at least 518, and rounds them to a multiple of
@@ -322,6 +518,30 @@ def _draw_particles(field: list[dict], t: float, size: tuple[int, int]) -> Image
     return haze
 
 
+# The transitions that blend the incoming panel over the outgoing one, and so
+# need its final frame. "cut" and "impact_cut" both land instantly and do not.
+_BLENDING_TRANSITIONS = frozenset(
+    {"fade", "flash", "slide_up", "slide_left", "whip_pan"}
+)
+
+
+def needs_prev_frame(transition: str) -> bool:
+    """Whether ``transition`` has to be handed the previous panel's last frame."""
+    return transition in _BLENDING_TRANSITIONS
+
+
+def _streak(image: Image.Image, pixels: int) -> Image.Image:
+    """Horizontal smear, for the whip that carries one panel into the next."""
+    accumulated = image
+    for step in range(1, 5):
+        offset = pixels * step / 4.0
+        sample = image.transform(
+            image.size, Image.AFFINE, (1, 0, offset, 0, 1, 0), resample=Image.BILINEAR
+        )
+        accumulated = Image.blend(accumulated, sample, 1.0 / (step + 1))
+    return accumulated
+
+
 def _apply_transition(
     frame: Image.Image, prev: Image.Image, kind: str, progress: float
 ) -> Image.Image:
@@ -340,6 +560,17 @@ def _apply_transition(
         if e < 0.5:
             return Image.blend(prev, Image.new("RGB", frame.size, (255, 255, 255)), e * 2)
         return Image.blend(Image.new("RGB", frame.size, (255, 255, 255)), frame, (e - 0.5) * 2)
+    if kind == "whip_pan":
+        # Both panels smeared hardest at the midpoint, where the camera is
+        # notionally moving fastest, and sliding through in the same direction.
+        smear = int(round(90 * math.sin(math.pi * e)))
+        out = Image.new("RGB", frame.size)
+        for image, x in ((prev, -int(round(width * e))), (frame, int(round(width * (1 - e))))):
+            if smear > 1:
+                image = image.filter(ImageFilter.GaussianBlur(smear * 0.18))
+                image = _streak(image, smear)
+            out.paste(image, (x, 0))
+        return out
     if kind in ("slide_up", "slide_left"):
         out = prev.copy()
         if kind == "slide_up":
@@ -364,8 +595,15 @@ def parallax_clip(
     transition: str = "cut",
     prev_frame: Image.Image | None = None,
     use_depth: bool = True,
+    motion_fx: str = "none",
+    grade: str = "none",
 ) -> Path:
     """Render one panel as a shot and encode it to ``out_path``.
+
+    This is the renderer for every still panel, not only the ones with effects
+    on. The camera move is sampled at floating-point positions, which is what
+    keeps a slow pan smooth; ffmpeg's zoompan can only crop at whole input
+    pixels, so the same move stalls for several frames and then jumps.
 
     Three independent layers, any combination of which may be active: the camera
     move, eligible depth parallax on top of it, and a particle overlay on top.
@@ -384,37 +622,64 @@ def parallax_clip(
 
     width, height = size
     frames = max(1, int(round(duration * FPS)))
-    panel = _cover(Image.open(image_path).convert("RGB"), size)
+    panel = _graded(_cover(Image.open(image_path).convert("RGB"), size), grade)
 
     mesh_depth = _guided_mesh_depth(panel, depth_map(image_path), size) if depth_on else None
     field = _particle_field(particles, str(image_path), size)
+    # impact_cut is a hard cut, so it takes no transition frames at all — the
+    # jolt it is named for comes from the shake it forces on the panel instead.
+    shake = motion_fx == "impact_shake" or transition == "impact_cut"
+    speed_lines = _speed_line_field(str(image_path), size) if motion_fx == "speed_lines" else []
+    blurring = motion_fx == "motion_blur"
     transition_frames = (
         min(frames, max(1, int(round(_TRANSITION_SECONDS * FPS))))
-        if prev_frame is not None and transition != "cut"
+        if prev_frame is not None and transition not in ("cut", "impact_cut")
         else 0
     )
 
     proc = subprocess.Popen(
+        # A segment is an intermediate: it is concatenated and re-encoded, and
+        # then encoded once more with captions burned in. So this pass buys
+        # nothing by being slow — it only has to avoid throwing away detail
+        # before the passes that matter.
         ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
          "-s", f"{width}x{height}", "-r", str(FPS), "-i", "-",
-         "-an", "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
-         str(out_path)],
+         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+         "-pix_fmt", "yuv420p", str(out_path)],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     try:
         span = max(1, frames - 1)
+        base, base_camera = None, None
         for i in range(frames):
             seconds = i / FPS
-            zoom, fx, fy = _move_at(move, i / span)
+            camera = _move_at(move, i / span)
+            if shake:
+                camera = _shake_at(camera, seconds)
             # Opaque RGB throughout, which is also the pixel format ffmpeg wants,
-            # so the finished frame needs no conversion.
-            if mesh_depth is not None:
-                frame = _warp(panel, mesh_depth, zoom, fx, fy, size)
-            else:
-                frame = _place(panel, zoom, fx, fy, 1.0, size)
+            # so the finished frame needs no conversion. A held camera — the
+            # whole of a "static" panel — resamples once and reuses the result.
+            if camera != base_camera:
+                base_camera = camera
+                base = (
+                    _warp(panel, mesh_depth, *camera, size)
+                    if mesh_depth is not None
+                    else _place(panel, *camera, size)
+                )
+            frame = base
+            # Blur first: it is the camera smearing the picture, so it belongs
+            # under the drawn layers rather than over them.
+            if blurring:
+                frame = _motion_blur(frame, move, seconds)
             if field:
                 overlay = _draw_particles(field, seconds, size)
+                frame = frame.copy() if frame is base else frame
                 frame.paste(overlay, (0, 0), overlay)
+            if speed_lines:
+                lines = _draw_speed_lines(speed_lines, seconds, size)
+                if lines is not None:
+                    frame = frame.copy() if frame is base else frame
+                    frame.paste(lines, (0, 0), lines)
             if i < transition_frames:
                 frame = _apply_transition(
                     frame, prev_frame, transition, (i + 1) / transition_frames
@@ -470,24 +735,24 @@ def _warp(panel: Image.Image, mesh_depth: np.ndarray, zoom: float, fx: float,
     return panel.transform(size, Image.MESH, mesh, resample=Image.BICUBIC)
 
 
-def _place(rgba: Image.Image, zoom: float, fx: float, fy: float, gain: float,
+def _place(panel: Image.Image, zoom: float, fx: float, fy: float,
            size: tuple[int, int]) -> Image.Image:
-    """One layer, zoomed and offset by its own share of the camera move.
+    """The panel at one point in a flat camera move, resampled to the output.
 
-    A single affine resample straight into the output size. The obvious
-    implementation — scale the whole layer up, then crop — resamples millions of
-    pixels that are then thrown away, and at 30fps that dominated the render.
+    The source window is a floating-point rectangle, and ``resize`` takes it as
+    ``box`` and filters straight into the output size. Sub-pixel positioning is
+    the whole point: an eased move often travels less than a pixel per frame, so
+    a renderer that can only crop at whole pixels holds the frame still and then
+    snaps, which reads as a shake rather than as a camera. It also resamples
+    only the pixels that survive, instead of scaling the whole panel up first.
     """
-    width, height = size
-    z = max(1.0, 1.0 + (zoom - 1.0) * gain)
+    z = max(1.0, zoom)
     # Source window that maps onto the output, and the slack the zoom leaves for
-    # the layer to travel through without exposing the canvas edge.
-    win_w, win_h = width / z, height / z
-    slack_x, slack_y = width - win_w, height - win_h
-    left = min(max(slack_x / 2 + fx * gain * slack_x, 0.0), slack_x)
-    top = min(max(slack_y / 2 + fy * gain * slack_y, 0.0), slack_y)
-    # AFFINE maps output -> source: src = (x/z + left, y/z + top).
-    return rgba.transform(
-        size, Image.AFFINE, (1.0 / z, 0.0, left, 0.0, 1.0 / z, top),
-        resample=Image.BILINEAR,
+    # the panel to travel through without exposing the canvas edge.
+    win_w, win_h = panel.width / z, panel.height / z
+    slack_x, slack_y = panel.width - win_w, panel.height - win_h
+    left = min(max(slack_x / 2 + fx * slack_x, 0.0), slack_x)
+    top = min(max(slack_y / 2 + fy * slack_y, 0.0), slack_y)
+    return panel.resize(
+        size, Image.BICUBIC, box=(left, top, left + win_w, top + win_h)
     )

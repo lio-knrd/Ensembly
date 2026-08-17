@@ -34,7 +34,11 @@ def _bool(value: str | None, default: bool) -> bool:
 # *constant*, not a DB-backed setting: a project's placement is stored on the
 # project itself, so adjusting one project never moves the starting point for
 # the next one — every new project opens at the default below.
-SUBTITLE_POSITION_DEFAULT = 0.128  # 245px on a 1920px-tall frame
+# 422px up from the bottom of a 1920px-tall frame. The old 0.128 put the caption
+# block at 245px, which is inside the strip TikTok covers with the handle,
+# caption and music ticker — the text was legible in the render and partly
+# buried in the app.
+SUBTITLE_POSITION_DEFAULT = 0.22
 SUBTITLE_POSITION_MIN = 0.02
 SUBTITLE_POSITION_MAX = 0.85
 
@@ -96,6 +100,12 @@ class Settings(BaseModel):
     ).resolve()
 
     allow_offline_fallback: bool = _bool(os.getenv("ALLOW_OFFLINE_FALLBACK"), True)
+
+    # Append explicit content limits (no nudity, no gore) to every prompt sent
+    # to an image or video model. Hosted models moderate their own input and a
+    # rejection fails the pipeline step outright, which mythology topics hit
+    # regularly. Set SAFE_IMAGE_PROMPTS=0 to send prompts through untouched.
+    safe_image_prompts: bool = _bool(os.getenv("SAFE_IMAGE_PROMPTS"), True)
 
     # ------------------------------------------------------------------ #
     # Per-stage active model constants (one default model per stage).

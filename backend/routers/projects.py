@@ -1,6 +1,7 @@
 """Project + scene endpoints and pipeline controls."""
 from __future__ import annotations
 
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -292,7 +293,10 @@ def delete_project(project_id: str, session: Session = Depends(get_session)):
     if not project:
         raise HTTPException(404, "Project not found")
     folder_path = project.folder_path
-    pipeline.cancel_project(project_id)
+    # Stop workers without first committing a CANCELED state in a second SQLite
+    # session. This request owns the one transaction that resets any backlog
+    # link and removes all project rows.
+    pipeline.stop_project_jobs(project_id)
     # An editorial item is a planning record, not a disposable child of the
     # project. Keep it in the Idea Log and return it to the planned queue.
     for item in session.exec(select(EditorialItem).where(EditorialItem.project_id == project_id)):
@@ -304,6 +308,10 @@ def delete_project(project_id: str, session: Session = Depends(get_session)):
         session.delete(s)
     for link in session.exec(select(ProjectCharacter).where(ProjectCharacter.project_id == project_id)):
         session.delete(link)
+    # These models intentionally use explicit application-level deletion rather
+    # than database cascades. Flush children and nullable backlog links first so
+    # SQLite's production foreign-key enforcement can accept the parent delete.
+    session.flush()
     session.delete(project)
     session.commit()
     _delete_project_folder(folder_path)
@@ -538,11 +546,43 @@ def _publish_text(project: Project) -> dict:
     }
 
 
+# Brackets stop the match so a URL written inside them, which is how the
+# Creative Commons deed is credited, leaves its brackets behind to be cleaned up
+# rather than swallowing the closing one and stranding the opening one.
+_URL_RE = re.compile(r"https?://[^\s<>()\[\]]+")
+_EMPTY_PARENS_RE = re.compile(r"\(\s*\)")
+
+
+def without_links(text: str) -> str:
+    """``text`` with bare URLs taken out, and lines that were only a URL dropped.
+
+    TikTok ranks a caption carrying an off-platform address below the same
+    caption without one, and the soundtrack credit appended at render time is
+    mostly address: a "Source:" line and the licence deed. What the licence
+    actually obliges us to reproduce is the track, the artist, the licence name
+    and the fact that we changed it, all of which survive this. The full credit
+    with its links still goes out on YouTube, where a link costs nothing.
+    """
+    kept: list[str] = []
+    for line in text.splitlines():
+        if not _URL_RE.search(line):
+            kept.append(line)
+            continue
+        remainder = _EMPTY_PARENS_RE.sub("", _URL_RE.sub("", line))
+        # The address left a hole in the line it was taken out of.
+        remainder = re.sub(r"[^\S\n]{2,}", " ", remainder).strip()
+        # "Source: <url>" leaves a dangling label with nothing to introduce;
+        # "License: CC BY 3.0 (<url>)" still names the licence, so it stays.
+        if remainder and not remainder.endswith(":"):
+            kept.append(remainder)
+    return "\n".join(kept).strip()
+
+
 def _tiktok_caption(project: Project) -> str:
-    """The TikTok caption: the shared description, trimmed to TikTok's limit."""
+    """The TikTok caption: the shared description, delinked and trimmed."""
     text = _publish_text(project)
     caption = text["description"] or text["title"] or project.title
-    return caption.strip()[: tiktok_service.MAX_CAPTION_CHARS]
+    return without_links(caption).strip()[: tiktok_service.MAX_CAPTION_CHARS]
 
 
 def _title_card_file(project: Project) -> Path | None:

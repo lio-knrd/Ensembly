@@ -90,32 +90,56 @@ def split_for_tts(text: str, limit: int) -> list[str]:
 class ElevenLabsTTSGenerator(TTSGenerator):
     name = "elevenlabs"
 
-    def __init__(self, voice_id: str | None = None) -> None:
+    def __init__(self, voice_id: str | None = None, speed: float = 1.0) -> None:
         self.voice_id = (voice_id or settings.elevenlabs_voice_id).strip()
+        self.speed = max(0.7, min(1.2, float(speed or 1.0)))
 
-    def synthesize(self, text, audio_out: Path, timestamps_out: Path) -> TTSResult:
+    def synthesize(
+        self, text, audio_out: Path, timestamps_out: Path, *,
+        previous_text: str = "", next_text: str = "",
+    ) -> TTSResult:
         audio_out.parent.mkdir(parents=True, exist_ok=True)
         # Cap the soft target below the hard ~10k API limit, with margin.
         limit = max(1000, min(settings.elevenlabs_max_chars_per_request, 9000))
         # Common case (short-form narration) stays a single request — byte-for-byte
         # the previous behavior — so only genuinely long runs get chunked.
         if len(text) <= limit:
-            audio, words, duration = self._request(text)
+            audio, words, duration = self._request(
+                text, previous_text=previous_text, next_text=next_text
+            )
             audio_out.write_bytes(audio)
             _write_timestamps(timestamps_out, words, duration)
             return TTSResult(audio_out, timestamps_out, duration)
-        return self._synthesize_chunked(text, audio_out, timestamps_out, limit)
+        return self._synthesize_chunked(
+            text,
+            audio_out,
+            timestamps_out,
+            limit,
+            previous_text=previous_text,
+            next_text=next_text,
+        )
 
-    def _request(self, text: str) -> tuple[bytes, list[dict], float]:
+    def _request(
+        self, text: str, *, previous_text: str = "", next_text: str = ""
+    ) -> tuple[bytes, list[dict], float]:
         """One TTS call: raw mp3 bytes, word timings, and the chunk's duration."""
         url = (
             f"https://api.elevenlabs.io/v1/text-to-speech/"
             f"{self.voice_id}/with-timestamps"
         )
+        payload = {
+            "text": text,
+            "model_id": settings.elevenlabs_model,
+            "voice_settings": {"speed": self.speed},
+        }
+        if previous_text.strip():
+            payload["previous_text"] = previous_text.strip()
+        if next_text.strip():
+            payload["next_text"] = next_text.strip()
         resp = httpx.post(
             url,
             headers={"xi-api-key": settings.elevenlabs_api_key},
-            json={"text": text, "model_id": settings.elevenlabs_model},
+            json=payload,
             timeout=180,
         )
         resp.raise_for_status()
@@ -126,7 +150,14 @@ class ElevenLabsTTSGenerator(TTSGenerator):
         return audio, words, duration
 
     def _synthesize_chunked(
-        self, text: str, audio_out: Path, timestamps_out: Path, limit: int
+        self,
+        text: str,
+        audio_out: Path,
+        timestamps_out: Path,
+        limit: int,
+        *,
+        previous_text: str = "",
+        next_text: str = "",
     ) -> TTSResult:
         """Synthesize long narration in multiple requests, stitched into one take.
 
@@ -142,7 +173,15 @@ class ElevenLabsTTSGenerator(TTSGenerator):
         with tempfile.TemporaryDirectory() as tmp:
             parts: list[Path] = []
             for idx, chunk in enumerate(chunks):
-                audio, words, duration = self._request(chunk)
+                audio, words, duration = self._request(
+                    chunk,
+                    previous_text=(
+                        chunks[idx - 1] if idx else previous_text
+                    ),
+                    next_text=(
+                        chunks[idx + 1] if idx + 1 < len(chunks) else next_text
+                    ),
+                )
                 part = Path(tmp) / f"part_{idx:03d}.mp3"
                 part.write_bytes(audio)
                 parts.append(part)
@@ -184,8 +223,14 @@ class OfflineTTSGenerator(TTSGenerator):
 
     name = "offline"
 
-    def synthesize(self, text, audio_out: Path, timestamps_out: Path) -> TTSResult:
-        duration = _estimate_duration(text)
+    def __init__(self, speed: float = 1.0) -> None:
+        self.speed = max(0.7, min(1.2, float(speed or 1.0)))
+
+    def synthesize(
+        self, text, audio_out: Path, timestamps_out: Path, *,
+        previous_text: str = "", next_text: str = "",
+    ) -> TTSResult:
+        duration = round(_estimate_duration(text) / self.speed, 3)
         self._silent_mp3(audio_out, duration)
         words = self._even_words(text, duration)
         _write_timestamps(timestamps_out, words, duration)

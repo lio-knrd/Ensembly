@@ -99,13 +99,49 @@ class Transition(str, Enum):
     SLIDE_UP = "slide_up"
     SLIDE_LEFT = "slide_left"
     FLASH = "flash"
+    # Both borrowed straight from comics. WHIP_PAN throws one panel off the side
+    # and drags the next in behind it, smeared; IMPACT_CUT is a plain hard cut
+    # that lands with a shake, so it takes no transition time at all.
+    WHIP_PAN = "whip_pan"
+    IMPACT_CUT = "impact_cut"
+
+
+class Grade(str, Enum):
+    """A colour treatment applied to the panel at render time.
+
+    Emotion is the reason it exists: the artwork carries the series palette, and
+    the grade bends it toward what the beat feels like. Applied to the source
+    picture rather than per frame, so it costs one pass and leaves the drawn
+    overlays untinted.
+    """
+
+    NONE = "none"
+    WARM = "warm"
+    COLD = "cold"
+    BLOOD = "blood"
+    MOONLIGHT = "moonlight"
+    MEMORY = "memory"
+
+
+class MotionFx(str, Enum):
+    """An impact effect drawn over the panel at render time.
+
+    Distinct from Particles, which is atmosphere that drifts for the whole
+    panel. These hit at the top of a panel and are gone within half a second,
+    which is what separates a blow landing from a filter being applied.
+    """
+
+    NONE = "none"
+    SPEED_LINES = "speed_lines"
+    IMPACT_SHAKE = "impact_shake"
+    MOTION_BLUR = "motion_blur"
 
 
 class CameraMove(str, Enum):
     """The camera move for a shot.
 
     On a still it is the whole of the motion the viewer sees: it is applied as a
-    real move over the image at render time (services/ffmpeg.ken_burns_clip), so
+    real move over the image at render time (services/parallax.parallax_clip), so
     picking a different one per scene is what keeps a still-heavy video from
     looking like a slideshow with one repeated zoom. On a video scene it rides
     along as a hint in the clip prompt and should agree with motion_prompt.
@@ -215,6 +251,13 @@ class Scene(SQLModel, table=True):
     # it, and both default to off because restraint is what makes them land.
     particles: Particles = Field(default=Particles.NONE)
     transition: Transition = Field(default=Transition.CUT)
+    motion_fx: MotionFx = Field(default=MotionFx.NONE)
+    grade: Grade = Field(default=Grade.NONE)
+    # Which continuous scene this panel belongs to. Consecutive panels sharing a
+    # beat are one moment seen from several angles, and the renderer and the
+    # image references both treat them as such. Empty means the panel stands
+    # alone, which is the default and the common case outside action.
+    beat_id: str = Field(default="")
     continuity_context: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
     scene_type: SceneType = Field(default=SceneType.STILL)
     # For video scenes, optionally animate toward the following scene's still.
@@ -351,6 +394,9 @@ class ContentPreset(SQLModel, table=True):
     # silently falls back when the model is unavailable (see parallax.available).
     panel_parallax: bool = True
     voice_id: str = ""
+    # Per-request ElevenLabs speed override.  A value below 1 gives dense
+    # narration more room without mutating the saved settings of a shared voice.
+    voice_speed: float = Field(default=1.0, ge=0.7, le=1.2)
     # When on, the script LLM may mark scenes as deterministic animations and
     # emit an animation spec for them. Off by default so narrative/photographic
     # presets (e.g. mythology) never get diagrams sprinkled in.

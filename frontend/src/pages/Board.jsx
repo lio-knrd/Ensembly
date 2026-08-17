@@ -354,7 +354,7 @@ function NewProjectModal({ onClose }) {
       </div>
       <div className="inline-fields">
         <div className="field">
-          <label>Target duration (seconds)</label>
+          <label>Rough length (seconds)</label>
           <input
             type="number"
             min="15"

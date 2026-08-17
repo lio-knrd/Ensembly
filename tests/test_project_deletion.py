@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 from backend.models import EditorialItem, EditorialPlan, Project
@@ -10,6 +11,11 @@ from backend.routers.projects import delete_project
 class ProjectDeletionTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine("sqlite://")
+
+        @event.listens_for(self.engine, "connect")
+        def enable_foreign_keys(connection, _record):
+            connection.execute("PRAGMA foreign_keys = ON")
+
         SQLModel.metadata.create_all(self.engine)
 
     def tearDown(self):
@@ -37,8 +43,14 @@ class ProjectDeletionTests(unittest.TestCase):
             item_id = item.id
             project_id = project.id
 
-            with patch("backend.routers.projects.pipeline.cancel_project"):
+            with (
+                patch("backend.routers.projects.pipeline.stop_project_jobs") as stop,
+                patch("backend.routers.projects.pipeline.cancel_project") as cancel,
+            ):
                 delete_project(project_id, session)
+
+            stop.assert_called_once_with(project_id)
+            cancel.assert_not_called()
 
             self.assertIsNone(session.get(Project, project_id))
             restored = session.get(EditorialItem, item_id)

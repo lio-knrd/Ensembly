@@ -645,6 +645,7 @@ function PresetEditor({
   const [panelParallax, setPanelParallax] = useState(preset.panel_parallax !== false);
   const panelsMode = visualMode === "panels";
   const [voiceId, setVoiceId] = useState(styleField ? preset.voice_id || "" : "");
+  const [voiceSpeed, setVoiceSpeed] = useState(styleField ? preset.voice_speed ?? 1 : 1);
   const [enableAnimations, setEnableAnimations] = useState(!!preset.enable_animations);
   const [voiceSearch, setVoiceSearch] = useState("");
   const [styleAssistantOpen, setStyleAssistantOpen] = useState(false);
@@ -694,6 +695,7 @@ function PresetEditor({
         Number(panelSeconds) !== (preset.panel_seconds ?? 4) ||
         panelParallax !== (preset.panel_parallax !== false) ||
         voiceId !== (preset.voice_id || "") ||
+        Number(voiceSpeed) !== (preset.voice_speed ?? 1) ||
         enableAnimations !== !!preset.enable_animations));
 
   const save = () => {
@@ -706,6 +708,7 @@ function PresetEditor({
     if (styleField) body.panel_seconds = Number(panelSeconds) || 4;
     if (styleField) body.panel_parallax = panelParallax;
     if (styleField) body.voice_id = voiceId;
+    if (styleField) body.voice_speed = Number(voiceSpeed) || 1;
     if (styleField) body.enable_animations = enableAnimations;
     Promise.resolve(onSave(body)).finally(() => setSaving(false));
   };
@@ -774,8 +777,9 @@ function PresetEditor({
                 onChange={(e) => setPanelSeconds(e.target.value)}
               />
               <div className="style-assistant-note">
-                Lower means more panels for the same runtime - a 75 second video at
-                4s per panel is around 19 panels. This is a target the script AI
+                The floor of the hold band - panels run from this to 2.5 seconds
+                longer. Lower means more panels and a faster read: a 75 second
+                video at 4s per panel is around 19 panels. A target the script AI
                 aims for, not a hard cut.
               </div>
               <label className="preset-field-label">2.5D parallax</label>
@@ -886,6 +890,22 @@ function PresetEditor({
           {selectedVoice?.description && (
             <div className="voice-note">{selectedVoice.description}</div>
           )}
+          <label className="preset-field-label">Narration speed</label>
+          <div className="row" style={{ alignItems: "center", gap: 10 }}>
+            <input
+              type="range"
+              min="0.7"
+              max="1.2"
+              step="0.05"
+              value={voiceSpeed}
+              onChange={(e) => setVoiceSpeed(e.target.value)}
+            />
+            <span style={{ minWidth: 42 }}>{Number(voiceSpeed).toFixed(2)}x</span>
+          </div>
+          <div className="style-assistant-note">
+            Applied per generation without changing the shared ElevenLabs voice.
+            Lower values give names and story turns more room to land.
+          </div>
           <label className="preset-field-label">Deterministic animations</label>
           <label className="row" style={{ fontSize: 13, cursor: "pointer", gap: 8 }}>
             <input

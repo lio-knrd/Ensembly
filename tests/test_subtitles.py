@@ -4,6 +4,7 @@ Placement is stored on the project and clamped to a renderable range; the
 default is a constant, so a project that moves its captions never changes where
 the next project starts.
 """
+import re
 import shutil
 import unittest
 from pathlib import Path
@@ -21,7 +22,21 @@ from backend.config import (
     settings,
 )
 from backend.models import Project, Scene, Stage
-from backend.services.ffmpeg import H, build_ass_captions
+from backend.services.ffmpeg import (
+    H,
+    W,
+    HOOK_HOLD_SECONDS,
+    HOOK_KICKER_SIZE,
+    HOOK_MAX_LINES,
+    HOOK_SIDE_MARGIN,
+    HOOK_SIZE_MAX,
+    HOOK_TOP_MARGIN,
+    _dashless_words,
+    _fmt_ass_time,
+    _hook_lines,
+    _hook_measurer,
+    build_ass_captions,
+)
 
 TIMELINE = {
     "words": [
@@ -79,6 +94,192 @@ class CaptionPlacementTests(unittest.TestCase):
             ]
             self.assertEqual(events[0], events[1])
             self.assertIn("Hello world.", events[0][0])
+
+
+class HookCardTests(unittest.TestCase):
+    """The opening hook, burned over the top of the frame for its first seconds."""
+
+    def _events(self, path: Path, style: str) -> list[str]:
+        return [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("Dialogue:") and f",{style}," in line
+        ]
+
+    def _hook_style(self, path: Path) -> list[str]:
+        line = next(
+            l for l in path.read_text(encoding="utf-8").splitlines()
+            if l.startswith("Style: Hook,")
+        )
+        return line.split(",")
+
+    def test_no_hook_means_no_hook_event(self):
+        with TemporaryDirectory() as tmp:
+            out = build_ass_captions(TIMELINE, Path(tmp) / "captions.ass")
+            self.assertEqual(self._events(out, "Hook"), [])
+
+    def _text(self, events: list[str]) -> str:
+        return " ".join(e.split("}")[-1] for e in events)
+
+    def test_hook_is_burned_from_zero_for_its_hold(self):
+        with TemporaryDirectory() as tmp:
+            out = build_ass_captions(
+                TIMELINE, Path(tmp) / "captions.ass",
+                hook_text="Zeus drowned every human on earth.",
+            )
+            events = self._events(out, "Hook")
+            self.assertTrue(events)
+            for event in events:
+                self.assertIn("0:00:00.00", event)
+                self.assertIn(_fmt_ass_time(HOOK_HOLD_SECONDS), event)
+            self.assertEqual(self._text(events), "Zeus drowned every human on earth.")
+
+    def test_each_line_is_placed_individually_for_its_leading(self):
+        """ASS has no line-spacing control, so the lines carry their own y."""
+        with TemporaryDirectory() as tmp:
+            out = build_ass_captions(
+                TIMELINE, Path(tmp) / "captions.ass",
+                hook_text="Zeus drowned every human on earth.",
+            )
+            events = self._events(out, "Hook")
+            self.assertEqual(len(events), 2)
+            ys = [int(re.search(r"\\pos\(\d+,(\d+)\)", e).group(1)) for e in events]
+            self.assertEqual(sorted(ys), ys)
+            size = int(self._hook_style(out)[2])
+            # Tighter than the ~1.2x a renderer would apply on its own.
+            self.assertLess(ys[1] - ys[0], size)
+
+    def test_hook_sits_at_the_top_and_leaves_the_captions_alone(self):
+        """Its own alignment and position, so it never displaces the narration."""
+        with TemporaryDirectory() as tmp:
+            plain = build_ass_captions(TIMELINE, Path(tmp) / "a.ass")
+            hooked = build_ass_captions(
+                TIMELINE, Path(tmp) / "b.ass", hook_text="A goddess stepped out."
+            )
+            self.assertEqual(
+                self._events(plain, "Caption"), self._events(hooked, "Caption")
+            )
+            # Format: ..., Alignment, MarginL, MarginR, MarginV, Encoding
+            self.assertEqual(self._hook_style(hooked)[-5], "8")
+            first = self._events(hooked, "Hook")[0]
+            self.assertIn(r"\pos(%d,%d)" % (W // 2, round(HOOK_TOP_MARGIN * H)), first)
+
+    def test_a_kicker_is_set_above_the_hook_in_capitals(self):
+        with TemporaryDirectory() as tmp:
+            out = build_ass_captions(
+                TIMELINE, Path(tmp) / "captions.ass",
+                hook_text="Zeus drowned every human on earth.",
+                hook_kicker="The Great Flood",
+            )
+            kick = self._events(out, "Kick")
+            self.assertEqual(len(kick), 1)
+            self.assertEqual(self._text(kick), "THE GREAT FLOOD")
+            kick_y = int(re.search(r"\\pos\(\d+,(\d+)\)", kick[0]).group(1))
+            hook_y = int(
+                re.search(r"\\pos\(\d+,(\d+)\)", self._events(out, "Hook")[0]).group(1)
+            )
+            self.assertGreater(hook_y, kick_y)
+
+    def test_a_kicker_without_a_hook_is_not_drawn_alone(self):
+        with TemporaryDirectory() as tmp:
+            out = build_ass_captions(
+                TIMELINE, Path(tmp) / "captions.ass", hook_kicker="The Great Flood"
+            )
+            self.assertEqual(self._events(out, "Kick"), [])
+
+    def test_the_hook_is_sized_to_fill_the_frame_width(self):
+        """A short hook gets bigger type than a long one, both inside the frame."""
+        usable = W - 2 * HOOK_SIDE_MARGIN
+        short_size, short_lines = _hook_lines("Athena was born armed.")
+        long_size, long_lines = _hook_lines("Zeus drowned every human on earth.")
+        self.assertGreater(short_size, long_size)
+        self.assertLessEqual(short_size, HOOK_SIZE_MAX)
+        for size, lines in ((short_size, short_lines), (long_size, long_lines)):
+            self.assertLessEqual(len(lines), HOOK_MAX_LINES)
+            width = _hook_measurer(size)
+            self.assertLessEqual(max(width(l) for l in lines), usable)
+
+    def test_an_over_long_hook_takes_a_third_line_rather_than_one_unwrapped(self):
+        """Left on one line, libass would break it at its own width."""
+        usable = W - 2 * HOOK_SIDE_MARGIN
+        size, lines = _hook_lines(
+            "Zeus judged every living human unworthy and drowned them all."
+        )
+        self.assertGreater(len(lines), HOOK_MAX_LINES)
+        width = _hook_measurer(size)
+        self.assertLessEqual(max(width(l) for l in lines), usable)
+
+    def test_a_wrapped_hook_does_not_strand_a_single_word(self):
+        """A greedy wrap left "earth." alone on its own line."""
+        _, lines = _hook_lines("Zeus drowned every human on earth.")
+        self.assertEqual(len(lines), 2)
+        self.assertGreater(min(len(line.split()) for line in lines), 1)
+
+    def test_whitespace_only_hook_is_treated_as_absent(self):
+        with TemporaryDirectory() as tmp:
+            out = build_ass_captions(
+                TIMELINE, Path(tmp) / "captions.ass", hook_text="   \n  "
+            )
+            self.assertEqual(self._events(out, "Hook"), [])
+
+
+class DashCaptionTests(unittest.TestCase):
+    """Dashes stay in the narration the voice reads and leave the caption."""
+
+    def _words(self, *tokens):
+        return _dashless_words([
+            {"word": w, "start": i * 0.5, "end": i * 0.5 + 0.4}
+            for i, w in enumerate(tokens)
+        ])
+
+    def test_a_dash_between_words_becomes_a_comma(self):
+        out = self._words("cracked", "open", "—", "and", "a", "god.")
+        self.assertEqual([w["word"] for w in out], ["cracked", "open,", "and", "a", "god."])
+
+    def test_the_dropped_dash_hands_its_time_to_its_neighbour(self):
+        out = self._words("open", "—", "and")
+        # "open" now runs to where the dash ended, so "and" still starts on time.
+        self.assertAlmostEqual(out[0]["end"], 0.9)
+        self.assertAlmostEqual(out[1]["start"], 1.0)
+
+    def test_a_hyphen_inside_a_word_is_spelling_and_survives(self):
+        out = self._words("out,", "full-grown,", "armored.")
+        self.assertEqual([w["word"] for w in out], ["out,", "full-grown,", "armored."])
+
+    def test_a_dash_attached_to_a_word_becomes_a_comma(self):
+        self.assertEqual([w["word"] for w in self._words("come—", "a", "god")],
+                         ["come,", "a", "god"])
+        self.assertEqual([w["word"] for w in self._words("come", "—a", "god")],
+                         ["come,", "a", "god"])
+
+    def test_no_comma_is_doubled_onto_existing_punctuation(self):
+        self.assertEqual([w["word"] for w in self._words("wandered,", "—", "until")],
+                         ["wandered,", "until"])
+        self.assertEqual([w["word"] for w in self._words("stopped.", "—", "Then")],
+                         ["stopped.", "Then"])
+
+    def test_a_leading_dash_gives_its_start_to_the_first_word(self):
+        out = self._words("—", "Then", "silence.")
+        self.assertEqual([w["word"] for w in out], ["Then", "silence."])
+        self.assertAlmostEqual(out[0]["start"], 0.0)
+
+    def test_captions_render_without_a_dash(self):
+        timeline = {"words": [
+            {"word": "Artemis", "start": 0.0, "end": 0.5},
+            {"word": "took", "start": 0.5, "end": 0.8},
+            {"word": "the", "start": 0.8, "end": 0.9},
+            {"word": "wild", "start": 0.9, "end": 1.3},
+            {"word": "—", "start": 1.3, "end": 1.4},
+            {"word": "the", "start": 1.4, "end": 1.6},
+            {"word": "hunt.", "start": 1.6, "end": 2.0},
+        ]}
+        with TemporaryDirectory() as tmp:
+            out = build_ass_captions(timeline, Path(tmp) / "captions.ass")
+            events = [l for l in out.read_text(encoding="utf-8").splitlines()
+                      if l.startswith("Dialogue:")]
+            text = " ".join(e.split(",,")[-1] for e in events)
+            self.assertNotIn("—", text)
+            self.assertIn("wild,", text)
 
 
 class ProjectDefaultsTests(unittest.TestCase):

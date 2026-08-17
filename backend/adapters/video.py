@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from ..config import settings
+from ..prompts import with_video_content_limits
 from .base import VideoGenerator
 
 
@@ -33,6 +34,10 @@ class FalVideoGenerator(VideoGenerator):
         from .image import _to_data_uri
 
         duration = min(self._MAX_DURATION, max(self._MIN_DURATION, round(duration_seconds)))
+        # Both generate() and submit() build their request here, so the content
+        # limits ride along on every clip request from one place.
+        if settings.safe_image_prompts:
+            prompt = with_video_content_limits(prompt)
         payload = {
             "prompt": prompt,
             "start_image_url": _to_data_uri(image_path),

@@ -71,7 +71,9 @@ class ChunkedSynthesisTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             audio_out = Path(tmp) / "out.mp3"
             ts_out = Path(tmp) / "out.timestamps.json"
-            with mock.patch.object(gen, "_request", side_effect=lambda t: responses[t]), \
+            with mock.patch.object(
+                    gen, "_request", side_effect=lambda t, **_context: responses[t]
+                 ), \
                  mock.patch("backend.services.ffmpeg.concat_audio", side_effect=fake_concat), \
                  mock.patch("backend.services.ffmpeg._probe_duration", side_effect=fake_probe):
                 result = gen._synthesize_chunked(

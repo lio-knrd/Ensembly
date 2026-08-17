@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 
 from ..config import settings
+from ..prompts import with_image_content_limits
 from .base import ImageGenerator
 
 # 9:16 vertical, a sensible short-form default.
@@ -28,11 +29,26 @@ _KREA_DIRECT_ENDPOINT = "/generate/image/krea/krea-2/medium"
 _KREA_ASSET_CACHE_LOCK = threading.Lock()
 
 
+def _moderated(prompt: str) -> str:
+    """Carry the house content limits on every prompt that leaves for a model.
+
+    Applied here, at the edge, rather than at the many call sites that build
+    prompts, so a new caller cannot forget it. The offline generator is exempt:
+    it moderates nothing and would only draw the clause onto the placeholder.
+    """
+    return with_image_content_limits(prompt) if settings.safe_image_prompts else prompt
+
+
 class FalImageGenerator(ImageGenerator):
     name = "fal"
 
-    def generate(self, prompt, out_path: Path, reference_images=None):
-        payload: dict = {"prompt": prompt, "image_size": {"width": WIDTH, "height": HEIGHT}}
+    def generate(
+        self, prompt, out_path: Path, reference_images=None, reference_strengths=None
+    ):
+        payload: dict = {
+            "prompt": _moderated(prompt),
+            "image_size": {"width": WIDTH, "height": HEIGHT},
+        }
         if reference_images:
             # This endpoint accepts one image field; pack multiple refs into a
             # numbered contact sheet so characters and continuity refs arrive together.
@@ -58,15 +74,21 @@ class KreaImageGenerator(ImageGenerator):
 
     _ENDPOINT = "krea/v2/medium/text-to-image"
 
-    def generate(self, prompt, out_path: Path, reference_images=None):
+    def generate(
+        self, prompt, out_path: Path, reference_images=None, reference_strengths=None
+    ):
         payload: dict = {
-            "prompt": prompt,
+            "prompt": _moderated(prompt),
             "aspect_ratio": "9:16",
             "creativity": "medium",
         }
         if reference_images:
             payload["image_style_references"] = [
-                {"image_url": _to_data_uri(path)} for path in reference_images[:10]
+                {
+                    "image_url": _to_data_uri(path),
+                    "strength": _reference_strength(reference_strengths, index),
+                }
+                for index, path in enumerate(reference_images[:10])
             ]
         status = _queue_submit(self._ENDPOINT, payload)
         result = _queue_result(self._ENDPOINT, status)
@@ -85,17 +107,22 @@ class KreaDirectImageGenerator(ImageGenerator):
 
     name = "krea-direct"
 
-    def generate(self, prompt, out_path: Path, reference_images=None):
+    def generate(
+        self, prompt, out_path: Path, reference_images=None, reference_strengths=None
+    ):
         payload: dict = {
-            "prompt": prompt,
+            "prompt": _moderated(prompt),
             "aspect_ratio": "9:16",
             "resolution": "1K",
             "creativity": "medium",
         }
         if reference_images:
             payload["image_style_references"] = [
-                {"url": self._asset_url(path), "strength": 1.0}
-                for path in reference_images[:10]
+                {
+                    "url": self._asset_url(path),
+                    "strength": _reference_strength(reference_strengths, index),
+                }
+                for index, path in enumerate(reference_images[:10])
             ]
 
         headers = {
@@ -200,7 +227,9 @@ class OfflineImageGenerator(ImageGenerator):
 
     name = "offline"
 
-    def generate(self, prompt, out_path: Path, reference_images=None):
+    def generate(
+        self, prompt, out_path: Path, reference_images=None, reference_strengths=None
+    ):
         from PIL import Image, ImageDraw
 
         seed = int(hashlib.sha256(prompt.encode()).hexdigest(), 16)
@@ -231,6 +260,18 @@ def _to_data_uri(path: Path) -> str:
     b64 = base64.b64encode(data).decode()
     suffix = Path(path).suffix.lstrip(".") or "png"
     return f"data:image/{suffix};base64,{b64}"
+
+
+def _reference_strength(strengths: list[float] | None, index: int) -> float:
+    """A safe Krea style-reference strength for identity/continuity hints.
+
+    Krea's default is 1.0, which transfers composition language along with
+    visual style. Ensembly references are not style targets, so callers pass a
+    deliberately light per-image influence. The fallback stays conservative
+    for older/custom callers that provide paths without strengths.
+    """
+    value = strengths[index] if strengths and index < len(strengths) else 0.2
+    return max(0.0, min(float(value), 1.0))
 
 
 def _reference_data_uri(paths: list[Path]) -> str:

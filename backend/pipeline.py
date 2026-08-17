@@ -39,6 +39,8 @@ from .models import (
     CharacterForm,
     ContentPreset,
     MusicTrack,
+    Grade,
+    MotionFx,
     Particles,
     PlatformPreset,
     Project,
@@ -51,6 +53,8 @@ from .models import (
 )
 from .services import ffmpeg, parallax
 from .services.jamendo import ensure_downloaded, local_track_path
+from .services.pacing import panel_pacing_feedback
+from .services.typography import dashless_copy
 from .storage import project_folder
 
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -161,11 +165,21 @@ def _fail(session: Session, project: Project, where: str, exc: Exception) -> Non
     bus.publish("project.failed", project_id=project.id, error=project.error)
 
 
-def cancel_project(project_id: str) -> None:
-    """Request cancellation for queued/running work for one project."""
+def stop_project_jobs(project_id: str) -> None:
+    """Stop queued work without persisting any project state.
+
+    Deletion uses this path: writing CANCELED from a second database session
+    before the delete transaction can lock/race SQLite and leave a durable
+    canceled record when the actual deletion fails.
+    """
     with _jobs_lock:
         for future in list(_jobs_by_project.get(project_id, set())):
             future.cancel()
+
+
+def cancel_project(project_id: str) -> None:
+    """Request cancellation for queued/running work for one project."""
+    stop_project_jobs(project_id)
     with Session(engine) as session:
         project = session.get(Project, project_id)
         if not project:
@@ -263,6 +277,15 @@ def _content_voice_id(session: Session, project: Project) -> str | None:
     return (preset.voice_id if preset else "") or None
 
 
+def _content_voice_speed(session: Session, project: Project) -> float:
+    """Per-group narration speed, clamped to ElevenLabs' supported range."""
+    if not project.content_preset_id:
+        return 1.0
+    preset = session.get(ContentPreset, project.content_preset_id)
+    speed = (preset.voice_speed if preset else 1.0) or 1.0
+    return max(0.7, min(1.2, float(speed)))
+
+
 def _norm(text: str | None) -> str:
     return " ".join((text or "").strip().lower().replace("_", " ").replace("-", " ").split())
 
@@ -340,12 +363,17 @@ def _assignment_for_character(session: Session, char: Character, raw: dict) -> d
 
 def _apply_style(prompt: str, style: str) -> str:
     style = style.strip()
-    return (
-        f"{prompt.strip()}\n\n"
+    prompt = prompt.strip()
+    if not style:
+        return prompt
+    directive = (
         f"Visual style directive (mandatory, overrides any generic render look): {style}"
-        if style
-        else prompt.strip()
     )
+    # Editing a saved prompt hands the whole stored string back, directive
+    # included, so appending would stack a second copy on every round trip.
+    if directive in prompt:
+        return prompt
+    return f"{prompt}\n\n{directive}"
 
 
 def _unique_generated_title(session: Session, project: Project, requested: str) -> str:
@@ -757,34 +785,76 @@ def generate_script(project_id: str) -> None:
         platform = session.get(PlatformPreset, project.platform_preset_id) if project.platform_preset_id else None
         content = session.get(ContentPreset, project.content_preset_id) if project.content_preset_id else None
 
-        folder = Path(project_folder(project.title))
-        project.folder_path = folder.relative_to(settings.projects_dir.parent.parent).as_posix()
-        session.add(project)
-        session.commit()
+        # A generated title may differ from the working title used when the
+        # project folder was created. Regenerating the script must keep the
+        # existing asset folder; otherwise a failed rewrite silently repoints a
+        # finished project at a new empty directory.
+        folder = _folder(project)
+        if not project.folder_path:
+            project.folder_path = folder.relative_to(
+                settings.projects_dir.parent.parent
+            ).as_posix()
+            session.add(project)
+            session.commit()
 
         enable_animations = bool(content and content.enable_animations)
         panels_mode = bool(content and content.visual_mode == VisualMode.PANELS)
         panel_seconds = (content.panel_seconds if content else 4.0) or 4.0
         try:
             gen = get_script_generator()
-            user_prompt = prompts.build_script_prompt(
-                platform.format_prompt if platform else "",
-                content.content_prompt if content else "",
-                project.topic_prompt,
-                project.target_duration_seconds,
-                enable_animations=enable_animations,
-                latex_available=_latex_available(),
-                revision_notes=project.revision_notes,
-                panels_mode=panels_mode,
-                panel_seconds=panel_seconds,
-            )
-            script = gen.generate(
-                prompts.CORE_SYSTEM_PROMPT,
-                user_prompt,
-                prompts.build_script_schema(enable_animations, panels_mode),
-                project.topic_prompt,
-                project.target_duration_seconds,
-            )
+            existing_scenes = session.exec(
+                select(Scene)
+                .where(Scene.project_id == project.id)
+                .order_by(Scene.order_index)
+            ).all()
+            pacing_feedback = ""
+            if existing_scenes:
+                from .adapters.base import GeneratedScene, GeneratedScript
+
+                pacing_feedback = panel_pacing_feedback(
+                    GeneratedScript(
+                        scenes=[
+                            GeneratedScene(
+                                narration_text=scene.narration_text,
+                                image_prompt=scene.image_prompt,
+                                scene_type=scene.scene_type.value,
+                            )
+                            for scene in existing_scenes
+                        ],
+                        metadata={},
+                    ),
+                    panels_mode=panels_mode,
+                    panel_seconds=panel_seconds,
+                    target_seconds=project.target_duration_seconds,
+                )
+            for attempt in range(2):
+                user_prompt = prompts.build_script_prompt(
+                    platform.format_prompt if platform else "",
+                    content.content_prompt if content else "",
+                    project.topic_prompt,
+                    project.target_duration_seconds,
+                    enable_animations=enable_animations,
+                    latex_available=_latex_available(),
+                    revision_notes=project.revision_notes,
+                    panels_mode=panels_mode,
+                    panel_seconds=panel_seconds,
+                    pacing_feedback=pacing_feedback,
+                )
+                script = gen.generate(
+                    prompts.CORE_SYSTEM_PROMPT,
+                    user_prompt,
+                    prompts.build_script_schema(enable_animations, panels_mode),
+                    project.topic_prompt,
+                    project.target_duration_seconds,
+                )
+                pacing_feedback = panel_pacing_feedback(
+                    script,
+                    panels_mode=panels_mode,
+                    panel_seconds=panel_seconds,
+                    target_seconds=project.target_duration_seconds,
+                )
+                if not pacing_feedback or attempt == 1:
+                    break
         except Exception as exc:  # noqa: BLE001
             if _stop_if_canceled(session, project):
                 return
@@ -798,6 +868,12 @@ def generate_script(project_id: str) -> None:
         # authored later (post-audio), so this is a pure narration/structure merge.
         if enable_animations:
             script.scenes = _merge_consecutive_animations(script.scenes)
+
+        # Everything below is copy the audience reads rather than words the
+        # voice speaks, so the dashes come out here — before the title, the
+        # cover text and script.json are all derived from it. The narration on
+        # script.scenes is deliberately left alone: the voice needs the beat.
+        script.metadata = dashless_copy(script.metadata)
 
         generated_title = str(script.metadata.get("title", "")).strip()
         if generated_title and not project.title_is_custom:
@@ -869,6 +945,9 @@ def generate_script(project_id: str) -> None:
                     camera_move=CameraMove(s.camera_move),
                     particles=Particles(s.particles),
                     transition=Transition(s.transition),
+                    motion_fx=MotionFx(s.motion_fx),
+                    grade=Grade(s.grade),
+                    beat_id=s.beat_id,
                     continuity_context=s.continuity_context,
                     scene_type=SceneType(s.scene_type),
                     animation_spec=s.animation,
@@ -1166,6 +1245,11 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
             has_sheet = bool(form.reference_image_path if form else False)
             form_name = form.name if form else (state or "Default")
             description = form.description if form and form.description else char.description
+            # Show the prompt that WOULD be sent for a character that has never
+            # been generated, not just the one a past run stored, so the wording
+            # can be corrected before a moderated model rejects it rather than
+            # only afterwards.
+            stored_prompt = form.reference_prompt if form else ""
             cast.append({
                 "key": key,
                 "name": char.name,
@@ -1180,7 +1264,12 @@ def compute_cast(session: Session, project: Project) -> list[dict]:
                 "has_sheet": has_sheet,
                 "reference_image_path": form.reference_image_path if form else None,
                 "reference_version": form.reference_version if form else 0,
-                "reference_prompt": form.reference_prompt if form else "",
+                "reference_prompt": stored_prompt
+                or _default_sheet_prompt(
+                    f"{char.name} ({state})" if state else char.name,
+                    description,
+                    _content_style(session, project),
+                ),
                 "reference_style_prompt": form.reference_style_prompt if form else "",
                 "reference_variants": _paths_with(
                     form.reference_variants if form else [],
@@ -1227,8 +1316,17 @@ def generate_character_sheet(
 
     with Session(engine) as session:
         project = session.get(Project, project_id)
-        if not project or project.stage in (Stage.CANCELED, Stage.FAILED):
+        if not project or project.stage == Stage.CANCELED:
             return
+        # A rejected sheet (a moderated image model refusing the prompt) leaves
+        # the project FAILED at cast review, and editing the prompt and asking
+        # again IS the fix. Re-open the review here rather than making the
+        # creator find "retry failed step" first, which would only replay the
+        # same prompt. Any other failure still has to be retried at its own step.
+        if project.stage == Stage.FAILED:
+            if _interrupted_stage(project) != Stage.CAST_REVIEW:
+                return
+            _set_stage(session, project, Stage.CAST_REVIEW, "Retrying character sheet")
         _set_msg(session, project, f"Generating character sheet: {name}…")
 
         # Reuse only a character from this project's own group; a same-named
@@ -1294,6 +1392,22 @@ def generate_character_sheet(
             if prompt
             else _default_sheet_prompt(form_label, form_description, style)
         )
+
+        # Save the form and the prompt we are about to send BEFORE sending it.
+        # When a moderated image model rejects the prompt, that prompt is the
+        # one thing the creator needs back in the cast panel to edit and retry;
+        # a form with no image still reads as "no sheet" there. Linking the
+        # character to the project and its scenes now (rather than only on
+        # success) is what puts the failed member on screen at all — until the
+        # link exists it is only a suggested name with no prompt to show.
+        form.reference_prompt = ref_prompt
+        form.reference_style_prompt = style
+        session.add(form)
+        session.commit()
+        session.refresh(form)
+        _link_character(session, project, char, form, state)
+        session.commit()
+
         try:
             folder = character_folder(char.name)
             (folder / "forms").mkdir(parents=True, exist_ok=True)
@@ -1308,8 +1422,6 @@ def generate_character_sheet(
             form.reference_variants = _paths_with(
                 form.reference_variants, previous, form.reference_image_path
             )
-            form.reference_prompt = ref_prompt
-            form.reference_style_prompt = style
             form.reference_version = (form.reference_version or 0) + 1
             if form.is_default:
                 char.reference_image_path = form.reference_image_path
@@ -1324,23 +1436,11 @@ def generate_character_sheet(
         except Exception as exc:  # noqa: BLE001
             if _stop_if_canceled(session, project):
                 return
-            _fail(session, project, "character sheet", exc)
+            # Name the member in the error: a cast can be a dozen sheets deep and
+            # "character sheet failed" alone leaves nothing to act on. The
+            # project.failed event refreshes the cast query along with it.
+            _fail(session, project, f"character sheet for {form_label}", exc)
             return
-
-        # Link to project and reconcile scenes (suggested name -> linked id).
-        if not session.get(ProjectCharacter, (project.id, char.id)):
-            session.add(ProjectCharacter(project_id=project.id, character_id=char.id))
-        low = char.name.lower()
-        for scene in session.exec(select(Scene).where(Scene.project_id == project.id)):
-            referenced = any(n.lower() == low for n in scene.suggested_characters)
-            if not referenced:
-                continue
-            scene.suggested_characters = [n for n in scene.suggested_characters if n.lower() != low]
-            if char.id not in scene.character_ids:
-                scene.character_ids = [*scene.character_ids, char.id]
-            session.add(scene)
-        _reconcile_scene_assignments(session, project.id, char, form, state)
-        session.commit()
 
         cast = compute_cast(session, project)
         missing = sum(1 for c in cast if not c["has_sheet"])
@@ -1353,6 +1453,33 @@ def generate_character_sheet(
         )
         bus.publish("character.updated", character_id=char.id, project_ids=[project.id])
         bus.publish("cast.updated", project_id=project.id)
+
+
+def _link_character(
+    session: Session,
+    project: Project,
+    char: Character,
+    form: CharacterForm,
+    state: str | None,
+) -> None:
+    """Attach a library character to the project and its scenes.
+
+    Turns the script's suggested name into a real linked id, so the cast panel
+    shows the character with its form and prompt whether or not its reference
+    image exists yet.
+    """
+    if not session.get(ProjectCharacter, (project.id, char.id)):
+        session.add(ProjectCharacter(project_id=project.id, character_id=char.id))
+    low = char.name.lower()
+    for scene in session.exec(select(Scene).where(Scene.project_id == project.id)):
+        referenced = any(n.lower() == low for n in scene.suggested_characters)
+        if not referenced:
+            continue
+        scene.suggested_characters = [n for n in scene.suggested_characters if n.lower() != low]
+        if char.id not in scene.character_ids:
+            scene.character_ids = [*scene.character_ids, char.id]
+        session.add(scene)
+    _reconcile_scene_assignments(session, project.id, char, form, state)
 
 
 def _reconcile_scene_assignments(
@@ -1395,6 +1522,13 @@ def generate_missing_sheets(project_id: str) -> None:
         project = session.get(Project, project_id)
         if not project:
             return
+        # Re-open a cast review that a rejected sheet failed, so this can be run
+        # straight from the panel. Failures at any other step still have to be
+        # retried at that step.
+        if project.stage == Stage.FAILED:
+            if _interrupted_stage(project) != Stage.CAST_REVIEW:
+                return
+            _set_stage(session, project, Stage.CAST_REVIEW, "Retrying character sheets")
         missing = [
             {"name": c["name"], "state": c.get("state") or ""}
             for c in compute_cast(session, project)
@@ -1404,6 +1538,11 @@ def generate_missing_sheets(project_id: str) -> None:
         with Session(engine) as session:
             project = session.get(Project, project_id)
             if not project or _stop_if_canceled(session, project):
+                return
+            # Stop on the first rejection instead of walking the rest of the
+            # cast: a later member succeeding would clear the failed state and
+            # bury the prompt that actually needs editing.
+            if project.stage == Stage.FAILED:
                 return
         generate_character_sheet(
             project_id,
@@ -1446,8 +1585,11 @@ def generate_audio(project_id: str) -> None:
             select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
         ).all()
         try:
-            tts = get_tts_generator(_content_voice_id(session, project))
-            for scene in scenes:
+            tts = get_tts_generator(
+                _content_voice_id(session, project),
+                _content_voice_speed(session, project),
+            )
+            for scene_index, scene in enumerate(scenes):
                 if _stop_if_canceled(session, project):
                     return
                 audio_out = folder / "audio" / f"scene_{scene.order_index + 1:02d}.mp3"
@@ -1461,18 +1603,31 @@ def generate_audio(project_id: str) -> None:
                     _save_scene_ready(session, project, scene)
                     continue
 
-                existing_duration = _timestamp_duration(ts_out)
-                if audio_out.exists() and existing_duration is not None:
-                    scene.audio_path = _rel(audio_out)
-                    scene.timestamps_path = _rel(ts_out)
-                    scene.duration_seconds = existing_duration
-                    _save_scene_ready(session, project, scene)
-                    continue
+                # Files with the deterministic legacy name may belong to scenes
+                # from a previous script. With no DB link there is no safe way
+                # to prove the text matches, so preserve them and write a fresh
+                # candidate instead of silently attaching stale narration.
+                if audio_out.exists() or ts_out.exists():
+                    audio_out = _candidate_path(
+                        folder, "audio", f"scene_{scene.order_index + 1:02d}", ".mp3"
+                    )
+                    ts_out = audio_out.with_suffix(".timestamps.json")
                 scene.status = "generating"
                 session.add(scene)
                 session.commit()
                 bus.publish("scene.status", project_id=project.id, scene_id=scene.id, status="generating", stage="audio")
-                result = tts.synthesize(scene.narration_text, audio_out, ts_out)
+                result = tts.synthesize(
+                    scene.narration_text,
+                    audio_out,
+                    ts_out,
+                    previous_text=(
+                        scenes[scene_index - 1].narration_text if scene_index else ""
+                    ),
+                    next_text=(
+                        scenes[scene_index + 1].narration_text
+                        if scene_index + 1 < len(scenes) else ""
+                    ),
+                )
                 if _stop_if_canceled(session, project):
                     return
                 scene.audio_path = _rel(audio_out)
@@ -1532,12 +1687,7 @@ def generate_storyboard(project_id: str) -> None:
                     if not _render_scene_animation(session, project, scene, folder):
                         return
                     continue
-                out = folder / "images" / f"scene_{scene.order_index + 1:02d}.png"
                 if _asset_exists(scene.image_path):
-                    _save_scene_ready(session, project, scene)
-                    continue
-                if out.exists():
-                    scene.image_path = _rel(out)
                     _save_scene_ready(session, project, scene)
                     continue
                 if not _generate_scene_image(session, project, scene, folder, img):
@@ -1581,27 +1731,43 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
 
     character_refs = _scene_character_refs(session, scene)
     continuity_refs = _scene_continuity_refs(session, project, scene)
-    refs = [ref["path"] for ref in character_refs] + [ref["path"] for ref in continuity_refs]
+    krea_style_refs = getattr(img, "name", "") in {"krea", "krea-direct"}
+    # Krea exposes every attached image as a *style* reference. A light character
+    # sheet is still useful for recognition, but a previous scene leaks its cast,
+    # pose and composition even at low strength. Keep continuity textual on Krea;
+    # other adapters retain the existing image-reference behaviour.
+    image_character_refs = (
+        [] if krea_style_refs and _is_distant_character_shot(scene.image_prompt)
+        else character_refs
+    )
+    image_continuity_refs = [] if krea_style_refs else continuity_refs
+    refs = [ref["path"] for ref in image_character_refs] + [
+        ref["path"] for ref in image_continuity_refs
+    ]
+    ref_strengths = [0.20] * len(image_character_refs) + [0.12] * len(image_continuity_refs)
 
     out = _candidate_path(
         folder, "images", f"scene_{scene.order_index + 1:02d}", ".png"
     )
-    ref_label = (
-        "style reference image"
-        if getattr(img, "name", "") in {"krea", "krea-direct"}
-        else "reference image panel"
+    scene_prompt, image_style = _image_prompt_and_style_for_scale(
+        scene.image_prompt,
+        _content_style(session, project),
+        character_refs,
     )
     prompt = _apply_continuity_context(
         _apply_character_context(
-            _apply_style(scene.image_prompt, _content_style(session, project)),
-            character_refs,
-            ref_label,
+            _apply_composition_contract(
+                _apply_style(scene_prompt, image_style),
+                scene.image_prompt,
+            ),
+            image_character_refs,
+            "character identity reference image",
         ),
         continuity_refs,
-        ref_label,
-        len(character_refs),
+        None if krea_style_refs else "continuity reference image",
+        len(image_character_refs),
     )
-    result = img.generate(prompt, out, refs or None)
+    result = img.generate(prompt, out, refs or None, ref_strengths or None)
     if _stop_if_canceled(session, project):
         return False
     previous = scene.image_path
@@ -1618,6 +1784,75 @@ def _generate_scene_image(session, project, scene: Scene, folder: Path, img) -> 
     session.commit()
     bus.publish("scene.updated", project_id=project.id, scene_id=scene.id)
     return True
+
+
+def _is_distant_character_shot(prompt: str) -> bool:
+    """Whether people are too small for a Krea identity style-ref to help.
+
+    At these scales the reference cannot improve a visible face, but can still
+    leak a giant portrait or hero pose into an otherwise environmental frame.
+    """
+    text = " ".join((prompt or "").lower().split())
+    return any(phrase in text for phrase in (
+        "extreme wide shot",
+        "high aerial wide shot",
+        "aerial extreme wide",
+    )) or ("wide shot" in text and "tiny" in text)
+
+
+def _apply_composition_contract(prompt: str, scene_prompt: str) -> str:
+    """Keep Krea's 'action-panel' aesthetic inside one cinematic frame."""
+    rules = (
+        "Composition contract: render one continuous cinematic frame at one moment "
+        "in time. Never create a collage, comic page, split-screen, montage, inset "
+        "panel, border, or close-up overlay. Obey the requested shot scale and camera "
+        "angle exactly."
+    )
+    if _is_distant_character_shot(scene_prompt):
+        rules += (
+            " This is an environmental distant shot: every named person must remain "
+            "small in the frame. Do not add enlarged faces, bodies, portraits, or "
+            "foreground character cutaways anywhere. Preserve the requested empty "
+            "negative space. Do not add a sail, canopy, curtain, flag, wing, cliff, "
+            "silhouette, or other large foreground shape unless explicitly requested."
+        )
+    return f"{prompt.strip()}\n\n{rules}"
+
+
+def _image_prompt_and_style_for_scale(
+    scene_prompt: str, style: str, character_refs: list[dict]
+) -> tuple[str, str]:
+    """Remove portrait attractors when the prompt explicitly dwarfs its cast."""
+    if "dwarfed" not in (scene_prompt or "").lower():
+        return scene_prompt, style
+
+    prompt = scene_prompt
+    replacements = (
+        "one tiny indistinct human figure",
+        "another tiny indistinct human figure",
+    )
+    for index, ref in enumerate(character_refs):
+        name = str(ref.get("name", "")).strip()
+        if name:
+            prompt = re.sub(
+                rf"\b{re.escape(name)}\b",
+                replacements[min(index, len(replacements) - 1)],
+                prompt,
+                flags=re.IGNORECASE,
+            )
+
+    # Preserve the established rendering language but remove clauses that ask
+    # Krea to turn a landscape into a character cover or comic-page montage.
+    distant_style = style
+    substitutions = {
+        "cinematic action-panel composition": "cinematic environmental composition",
+        "expressive faces": "naturalistic distant figures",
+        "vertical webtoon cover quality": "polished vertical cinematic illustration quality",
+        "consistent character rendering across scenes": "consistent world rendering across scenes",
+    }
+    for source, replacement in substitutions.items():
+        distant_style = distant_style.replace(source, replacement)
+    return prompt, distant_style
 
 
 def _latex_available() -> bool:
@@ -1806,10 +2041,40 @@ def scene_context_refs(session, project: Project, scene: Scene, limit: int = 10)
     )
 
 
+def _same_beat_predecessor(session, project: Project, scene: Scene) -> Scene | None:
+    """The panel immediately before this one, when it belongs to the same beat.
+
+    Immediately before, not merely earlier in the beat: a beat is continuous, so
+    the picture worth carrying forward is the one the reader just left. Returns
+    None for a panel that opens a beat or stands alone.
+    """
+    beat = (scene.beat_id or "").strip()
+    if not beat:
+        return None
+    previous = session.exec(
+        select(Scene)
+        .where(Scene.project_id == project.id, Scene.order_index < scene.order_index)
+        .order_by(Scene.order_index.desc())
+    ).first()
+    if previous is None or (previous.beat_id or "").strip() != beat:
+        return None
+    return previous
+
+
 def _scene_continuity_candidates(session, project: Project, scene: Scene) -> list[dict]:
-    """Earlier scene image candidates explicitly named in continuity_context."""
+    """Earlier scene image candidates for this panel.
+
+    Two sources: whatever ``continuity_context`` names, and — when this panel
+    continues the beat before it — that panel's own image, attached whether the
+    script asked for it or not. A beat is one moment shown from several angles,
+    so its panels have to agree on the place, the light and the palette, and the
+    surest way to get that is to hand the image model the picture it is
+    continuing from. Both are only candidates: the callers still drop anything
+    the user excluded.
+    """
     root = Path(settings.projects_dir.parent.parent)
-    if not scene.continuity_context:
+    beat_predecessor = _same_beat_predecessor(session, project, scene)
+    if not scene.continuity_context and beat_predecessor is None:
         return []
     previous_scenes = session.exec(
         select(Scene)
@@ -1824,6 +2089,27 @@ def _scene_continuity_candidates(session, project: Project, scene: Scene) -> lis
 
     candidates: list[tuple[int, dict]] = []
     seen_scene_ids: set[str] = set()
+    # First, so a long continuity_context can never crowd it out of the limit.
+    if beat_predecessor is not None and beat_predecessor.image_path:
+        path = root / beat_predecessor.image_path
+        if path.exists():
+            seen_scene_ids.add(beat_predecessor.id)
+            anchor = "the same scene, continued"
+            candidates.append((beat_predecessor.order_index, {
+                "scene_id": beat_predecessor.id,
+                "scene_number": beat_predecessor.order_index + 1,
+                "order_index": beat_predecessor.order_index,
+                "image_path": beat_predecessor.image_path,
+                "asset_version": beat_predecessor.asset_version or 0,
+                "prompt": beat_predecessor.image_prompt,
+                "path": path,
+                "visual_anchor": anchor,
+                "reason": (
+                    f"This panel continues beat '{scene.beat_id}': the place, the "
+                    "light and the palette carry over from it."
+                ),
+                "matches": [anchor],
+            }))
     for item in scene.continuity_context:
         try:
             source_scene = int(item.get("source_scene", 0))
@@ -1858,22 +2144,25 @@ def _apply_character_context(prompt: str, character_refs: list[dict], label: str
         return prompt
     lines = []
     for idx, ref in enumerate(character_refs, start=1):
-        desc = f" - {ref['description']}" if ref.get("description") else ""
-        lines.append(f"{idx}. {ref['name']}{desc}")
+        lines.append(f"{idx}. {ref['name']}")
     mapping = "\n".join(lines)
     return (
         f"{prompt.strip()}\n\n"
-        f"Character identity map (mandatory): attached {label}s are in this order:\n"
+        f"Character identity map: attached {label}s are in this order:\n"
         f"{mapping}\n"
-        f"Use the named characters exactly as mapped above, keep identities consistent, "
-        f"and do not swap characters when multiple people appear."
+        f"Use each reference only for stable physical identity: face, apparent age, "
+        f"build, hair, and other distinguishing anatomy. The current scene description "
+        f"is authoritative for shot scale, camera angle, pose, action, expression, "
+        f"costume, props, effects, environment, lighting, and composition. Do not copy "
+        f"those scene-specific elements or the framing/background from a reference. "
+        f"Keep identities consistent and do not swap people when several appear."
     )
 
 
 def _apply_continuity_context(
     prompt: str,
     continuity_refs: list[dict],
-    label: str,
+    label: str | None,
     start_index: int,
 ) -> str:
     if not continuity_refs:
@@ -1883,22 +2172,32 @@ def _apply_continuity_context(
         attached_index = start_index + offset
         anchor = ref.get("visual_anchor") or ", ".join(ref.get("matches", [])[:5])
         reason = ref.get("reason", "")
-        anchor_note = f" anchor: {anchor} -" if anchor else ""
-        reason_note = f" Reason: {reason}" if reason else ""
+        anchor_note = anchor or "the explicitly recurring element"
+        reason_note = f" Purpose: {reason}" if reason else ""
+        prefix = (
+            f"{attached_index}. Attached {label} from scene {ref['scene_number']}"
+            if label
+            else f"{offset}. From scene {ref['scene_number']}"
+        )
         lines.append(
-            f"{attached_index}. Scene {ref['scene_number']} continuity reference -{anchor_note} "
-            f"{ref['prompt']}{reason_note}"
+            f"{prefix}, preserve only this "
+            f"continuity anchor: {anchor_note}.{reason_note}"
         )
     mapping = "\n".join(lines)
+    heading = (
+        f"Visual continuity map: attached {label}s after the character references "
+        f"correspond to these entries:\n"
+        if label
+        else "Visual continuity notes:\n"
+    )
     return (
         f"{prompt.strip()}\n\n"
-        f"Visual continuity map (mandatory): attached {label}s after the character "
-        f"references show earlier scenes in this story:\n"
+        f"{heading}"
         f"{mapping}\n"
-        f"Carry forward any recurring context-bound props, costumes, architecture, "
-        f"landmarks, lighting logic, and spatial relationships that still belong in "
-        f"this moment. Do not introduce contradictions to established objects unless "
-        f"the current scene explicitly changes them."
+        f"Use only the explicitly named visual anchors. The current scene description "
+        f"remains authoritative: do not copy the earlier image's camera, framing, pose, "
+        f"lighting, incidental people, or overall composition. Carry forward recurring "
+        f"objects only where the current moment still requires them."
     )
 
 
@@ -1938,12 +2237,12 @@ def _build_clip_prompt(
 
 # Bumped whenever the panel renderer's output changes for the same inputs, so a
 # cached segment from an older version of the effects is not reused.
-_SEGMENT_RENDERER_VERSION = 6
+_SEGMENT_RENDERER_VERSION = 9
 
 
 def _segment_key(
     image: Path, duration: float, move: str, particles: str, transition: str,
-    parallax_on: bool, prev_token: str,
+    parallax_on: bool, prev_token: str, motion_fx: str, grade: str,
 ) -> str:
     """Identity of a rendered segment: same key means the same pixels.
 
@@ -1955,7 +2254,7 @@ def _segment_key(
     parts = [
         str(_SEGMENT_RENDERER_VERSION), str(image), str(stat.st_mtime_ns if stat else 0),
         str(stat.st_size if stat else 0), f"{duration:.3f}", move, particles,
-        transition, "P" if parallax_on else "F", prev_token,
+        transition, "P" if parallax_on else "F", prev_token, motion_fx, grade,
     ]
     return hashlib.sha1("|".join(parts).encode()).hexdigest()
 
@@ -1973,6 +2272,8 @@ def _render_still_segment(
     move = getattr(scene.camera_move, "value", scene.camera_move) or "push_in"
     particles = getattr(scene.particles, "value", scene.particles) or "none"
     transition = getattr(scene.transition, "value", scene.transition) or "cut"
+    motion_fx = getattr(scene.motion_fx, "value", scene.motion_fx) or "none"
+    grade = getattr(scene.grade, "value", scene.grade) or "none"
 
     # Depth parallax belongs to camera translation, not to every moving frame.
     # Pans/tilts are rotations and punch-in is an editorial zoom, so they use
@@ -1984,35 +2285,48 @@ def _render_still_segment(
 
     # A transition only exists if there is a previous segment to arrive from.
     prev_token = ""
-    if transition != "cut" and prev_clip and prev_clip.exists():
+    if parallax.needs_prev_frame(transition) and prev_clip and prev_clip.exists():
         prev_stat = prev_clip.stat()
         prev_token = f"{prev_stat.st_mtime_ns}:{prev_stat.st_size}"
-    else:
+    elif parallax.needs_prev_frame(transition):
+        # Nothing to arrive from, so the blend it asked for cannot happen.
         transition = "cut"
 
-    key = _segment_key(image, duration, move, particles, transition, parallax_on, prev_token)
+    key = _segment_key(
+        image, duration, move, particles, transition, parallax_on, prev_token,
+        motion_fx, grade,
+    )
     key_file = out.with_suffix(".key")
     if out.exists() and key_file.exists() and key_file.read_text(encoding="utf-8").strip() == key:
         return out
 
-    needs_python_renderer = parallax_on or particles != "none" or transition != "cut"
-    if needs_python_renderer:
-        try:
-            prev_frame = (
-                parallax.last_frame(prev_clip) if transition != "cut" and prev_clip else None
-            )
-            parallax.parallax_clip(
-                image, out, duration, move,
-                particles=particles,
-                transition=transition if prev_frame is not None else "cut",
-                prev_frame=prev_frame,
-                use_depth=parallax_on,
-            )
-            key_file.write_text(key, encoding="utf-8")
-            return out
-        except Exception as exc:  # noqa: BLE001
-            _set_msg(session, project, f"Effects unavailable for {image.name}; using a flat move")
-            print(f"panel effects failed for {image}: {exc}")
+    # Every panel goes through the Python renderer, effects or not. It samples
+    # the camera move at sub-pixel positions; ffmpeg's zoompan quantises the
+    # crop to whole input pixels, so an eased pan or tilt visibly stutters.
+    try:
+        prev_frame = (
+            parallax.last_frame(prev_clip)
+            if parallax.needs_prev_frame(transition) and prev_clip
+            else None
+        )
+        parallax.parallax_clip(
+            image, out, duration, move,
+            particles=particles,
+            transition=(
+                transition
+                if prev_frame is not None or not parallax.needs_prev_frame(transition)
+                else "cut"
+            ),
+            prev_frame=prev_frame,
+            use_depth=parallax_on,
+            motion_fx=motion_fx,
+            grade=grade,
+        )
+        key_file.write_text(key, encoding="utf-8")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        _set_msg(session, project, f"Effects unavailable for {image.name}; using a flat move")
+        print(f"panel effects failed for {image}: {exc}")
 
     ffmpeg.ken_burns_clip(image, out, duration, move)
     key_file.write_text(key, encoding="utf-8")
@@ -2327,10 +2641,13 @@ def render(project_id: str) -> None:
             # an earlier render is never picked back up.
             captions = None
             if project.subtitles_enabled:
+                hook_text, hook_kicker = _hook_card(folder)
                 captions = ffmpeg.build_ass_captions(
                     timeline,
                     folder / "final" / "captions.ass",
                     position=project.subtitle_position,
+                    hook_text=hook_text,
+                    hook_kicker=hook_kicker,
                 )
 
             narration = folder / "audio" / "full_narration.mp3"
@@ -2367,6 +2684,31 @@ def render(project_id: str) -> None:
         _set_stage(session, project, Stage.DONE, "Done")
 
 
+def _hook_card(folder: Path) -> tuple[str, str]:
+    """The script's on-screen hook and its kicker, read back at render time.
+
+    Read from script.json rather than carried on the project row because it is
+    copy the script model wrote, and a re-render should burn whatever the
+    current script says rather than a value cached when the row was last saved.
+
+    The kicker is ``cover_kicker``, shared with the title card rather than given
+    a field of its own: both want the same thing, a short label naming the arc
+    above the piece that carries the weight, and sharing it keeps the thumbnail
+    and the opening two seconds saying the same words.
+    """
+    script_path = folder / "script.json"
+    if not script_path.exists():
+        return "", ""
+    try:
+        metadata = json.loads(script_path.read_text(encoding="utf-8")).get("metadata", {})
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return "", ""
+    return (
+        str(metadata.get("hook_text", "") or "").strip(),
+        str(metadata.get("cover_kicker", "") or "").strip(),
+    )
+
+
 def _write_metadata(
     folder: Path,
     project: Project,
@@ -2380,6 +2722,9 @@ def _write_metadata(
             meta = json.loads(script_path.read_text(encoding="utf-8")).get("metadata", {})
         except json.JSONDecodeError:
             meta = {}
+    # Also cleaned here, not only where the script is generated, so re-rendering
+    # a project written before this takes the dashes out of its copy too.
+    meta = dashless_copy(meta)
     meta.setdefault("title", project.title)
     meta.setdefault("description", "")
     meta.setdefault("hashtags", [])
@@ -2394,27 +2739,109 @@ def _write_metadata(
     (folder / "final" / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
+def refresh_music_attribution() -> list[str]:
+    """Bring finished metadata up to the current music-credit wording.
+
+    The credit is baked into final/metadata.json when a project renders, so a
+    video rendered before the wording changed keeps the old text forever — the
+    placeholder "Source: Local library" that named no real source, or, for the
+    oldest renders, no credit at all even though the track is in the mix. This
+    recomputes the credit from the project's own track and swaps it in place,
+    leaving the rest of the description untouched.
+
+    Idempotent, and safe to run on every start: a credit that already matches is
+    skipped, and a description whose credit is not where we expect it is left
+    alone rather than guessed at. Returns the titles it rewrote.
+    """
+    updated: list[str] = []
+    with Session(engine) as session:
+        projects = session.exec(
+            select(Project).where(Project.folder_path.is_not(None))
+        ).all()
+        for project in projects:
+            # Mirror the render's own condition: no music in the video means
+            # there is nothing to credit.
+            if not (project.music_enabled and project.music_track_id):
+                continue
+            track = session.get(MusicTrack, project.music_track_id)
+            if not track:
+                continue
+            path = _folder(project) / "final" / "metadata.json"
+            if not path.exists():
+                continue
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                continue
+            current = _music_attribution(track)
+            stored = str(meta.get("music_attribution", "") or "")
+            if stored == current:
+                continue
+            description = _without_attribution(
+                str(meta.get("description", "") or ""), stored
+            )
+            if description is None:
+                continue
+            meta["description"] = f"{description}\n\n{current}".strip()
+            meta["music_attribution"] = current
+            try:
+                path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            except OSError:
+                continue
+            updated.append(project.title)
+    return updated
+
+
+def _without_attribution(description: str, stored: str) -> str | None:
+    """The description with its music credit stripped off the end.
+
+    Returns None when a credit is present but not in the expected trailing
+    position, which means the file was edited by hand and should be left as is.
+    """
+    description = description.rstrip()
+    if stored and description.endswith(stored.rstrip()):
+        return description[: -len(stored.rstrip())].rstrip()
+    marker = "\n\nMusic credit:"
+    index = description.rfind(marker)
+    if index != -1:
+        # A credit written by an older format, still in its own trailing block.
+        return description[:index].rstrip()
+    if "Music credit:" in description:
+        return None
+    # Rendered before credits existed: the track is in the mix and uncredited,
+    # so appending one is the correct outcome rather than a no-op.
+    return description
+
+
 def _music_attribution(track: MusicTrack) -> str:
     if track.provider == "local":
-        return "\n".join(
-            [
-                "Music credit:",
-                f'"{track.title}"',
-                f"Source: {track.artist_name or 'Local music library'}",
-                "License: Royalty-free user-provided track",
-            ]
-        )
+        # Local tracks carry whatever provenance we know: the uploader and the
+        # page it came from when recorded, otherwise a plain royalty-free note.
+        credit = f'"{track.title}"'
+        if track.artist_name:
+            credit += f" by {track.artist_name}"
+        lines = ["Music credit:", credit]
+        if track.share_url:
+            lines.append(f"Source: {track.share_url}")
+        lines.append(f"License: {_license_name(track.license_url)}")
+        lines.append("Changes: shortened and mixed with narration.")
+        return "\n".join(lines)
     source_url = track.share_url or f"https://www.jamendo.com/track/{track.provider_track_id}"
-    license_name = _creative_commons_license_name(track.license_url)
     return "\n".join(
         [
             "Music credit:",
             f'"{track.title}" by {track.artist_name or "Jamendo artist"}',
             f"Source: {source_url}",
-            f"License: {license_name} ({track.license_url})",
+            f"License: {_creative_commons_license_name(track.license_url)} ({track.license_url})",
             "Changes: shortened and mixed with narration.",
         ]
     )
+
+
+def _license_name(license_url: str) -> str:
+    if "creativecommons.org" in (license_url or "").lower():
+        return f"{_creative_commons_license_name(license_url)} ({license_url})"
+    return "Royalty-free, free to use"
 
 
 def _creative_commons_license_name(license_url: str) -> str:
@@ -2442,7 +2869,10 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
             scene.status = "generating"
             session.add(scene)
             session.commit()
-            tts = get_tts_generator(_content_voice_id(session, project))
+            tts = get_tts_generator(
+                _content_voice_id(session, project),
+                _content_voice_speed(session, project),
+            )
             previous = (
                 {
                     "path": scene.audio_path,
@@ -2456,7 +2886,22 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
                 folder, "audio", f"scene_{scene.order_index + 1:02d}", ".mp3"
             )
             ts_out = audio_out.with_suffix(".timestamps.json")
-            result = tts.synthesize(scene.narration_text, audio_out, ts_out)
+            ordered = session.exec(
+                select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
+            ).all()
+            scene_index = next(
+                (index for index, item in enumerate(ordered) if item.id == scene.id), 0
+            )
+            result = tts.synthesize(
+                scene.narration_text,
+                audio_out,
+                ts_out,
+                previous_text=(ordered[scene_index - 1].narration_text if scene_index else ""),
+                next_text=(
+                    ordered[scene_index + 1].narration_text
+                    if scene_index + 1 < len(ordered) else ""
+                ),
+            )
             if _stop_if_canceled(session, project):
                 return
             scene.audio_path = _rel(audio_out)
@@ -2478,9 +2923,6 @@ def regenerate_scene_audio(project_id: str, scene_id: str) -> None:
             scene.status = "ready"
             session.add(scene)
             session.commit()
-            ordered = session.exec(
-                select(Scene).where(Scene.project_id == project.id).order_by(Scene.order_index)
-            ).all()
             if _stop_if_canceled(session, project):
                 return
             ffmpeg.concat_audio(

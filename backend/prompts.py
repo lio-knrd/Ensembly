@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import copy
 
+from .services.pacing import MAX_RUNTIME_FACTOR, panel_hold_band
+
 # --------------------------------------------------------------------------- #
 # Layer 1 — Core system prompt (fixed, not editable, lives in code)
 # --------------------------------------------------------------------------- #
@@ -77,18 +79,70 @@ For each scene you must provide:
     in the response schema. Default to "cut" — a comic reads in cuts, and almost \
     every panel should be one. Use the others only where the story actually turns: \
     "fade" across a jump in time or place, "slide_up" or "slide_left" to carry \
-    momentum through a fall, a chase, or a descent, and "flash" for a violent or \
-    revelatory beat such as a blow landing, a death, or a god appearing. A handful \
-    in a whole video, not one every few panels. The first scene must be "cut": \
-    there is nothing for it to arrive from.
-  - continuity_context: an array of continuity links to earlier scene images. Use \
-    this ONLY when this scene genuinely needs a previously established prop, \
-    location, costume detail, symbol, vehicle, artifact, or environment to stay \
-    visually consistent. Each item must include source_scene (the earlier 1-based \
-    scene number), visual_anchor (the exact recurring visual element), and reason \
-    (why that earlier image should be referenced). If no earlier image is needed, \
-    return an empty array. Do not add links for general mood, theme, color, camera \
-    angle, characters, or broad setting similarity.
+    momentum through a fall, a chase, or a descent, "flash" for a violent or \
+    revelatory beat such as a blow landing, a death, or a god appearing, \
+    "whip_pan" to snap between two places or two people in the same instant, and \
+    "impact_cut" for the panel where a blow, a fall or a door actually lands — it \
+    cuts hard and shakes the frame rather than blending. A handful in a whole \
+    video, not one every few panels. The first scene must be "cut": there is \
+    nothing for it to arrive from.
+  - motion_fx: an impact effect drawn over this panel, from the values in the \
+    response schema. Unlike particles, which drift for the whole panel, these hit \
+    in the first half second and are gone. "speed_lines" draws the comic's radial \
+    streaks and belongs on the panel where a strike or a charge connects; \
+    "impact_shake" jolts the frame for a blow landing, an earthquake, a giant's \
+    step, a door breaking; "motion_blur" smears the panel along its own camera \
+    move and suits a fall, a chase, a body thrown. Default to "none". These are \
+    punctuation, not the motion itself — the motion belongs in the pictures, and \
+    an effect only marks the instant one of them lands. So a talking or \
+    establishing panel takes none, and even inside a fight only the panel where \
+    the blow actually connects carries one. Never put the same effect on \
+    consecutive panels, and never use one to make a static picture feel busier.
+  - grade: a colour treatment laid over this panel at render time, from the \
+    values in the response schema. This is where the emotion of a beat lives: \
+    "warm" for safety, home, a fire, a reunion or a small kindness, "cold" for \
+    dread, distance, a cruel decision or a place that does not want you there, \
+    "blood" for violence, rage and the moment something dies, "moonlight" for \
+    night, the supernatural and the uncanny, "memory" for a flashback or \
+    anything being remembered rather than happening. Default to "none", which \
+    should still be the most common answer, and let the artwork's own palette \
+    carry most panels. A grade belongs to the whole beat, so every panel sharing \
+    a beat_id takes the same one, and it changes when the feeling changes — a \
+    colour that shifts inside a continuous scene breaks it apart. Do not grade a \
+    panel merely because it is dark or bright; grade it because the story has \
+    turned.
+  - beat_id: a short lowercase slug naming the continuous scene this panel \
+    belongs to, such as "lion-wrestle" or "flight-over-the-sea". Consecutive \
+    panels that share a beat_id are read as one moment seen from several angles, \
+    the way a comic gives a single exchange a row of panels — so give a beat the \
+    two to six panels it actually takes and change only the angle, the distance \
+    and the action between them. The place, the time of day, the weather, the \
+    light direction and the palette must stay the same for every panel in a \
+    beat; when any of those genuinely changes, the beat has ended and a new \
+    beat_id starts. A fight is the clearest case: the swing, the block, the \
+    counter and the landing blow are four panels of one beat, not four scenes. \
+    Use an empty string for a panel that stands alone, which is the right answer \
+    for narration that moves through time or summarises, and expect a video to \
+    be a mix of both.
+    Inside a beat that carries action, every panel's image_prompt is a moment \
+    caught partway through a movement, never a pose: the swing already \
+    travelling, the body already leaving the ground, the spell already out of \
+    the hand, the block taken with the weight already behind it. A row of still \
+    portraits does not become a fight by being next to each other. The sense of \
+    motion in this format comes from the pictures themselves and from what \
+    changes between them, so make each panel a different instant of the same \
+    movement, and let the position of the bodies, the weapons, the hair and the \
+    cloth carry that difference.
+  - continuity_context: an array of continuity links to earlier scene images, \
+    used to hold a specific thing steady across panels. Each item must include \
+    source_scene (the earlier 1-based scene number), visual_anchor (the exact \
+    recurring visual element), and reason. Link to the previous panel of the \
+    same beat whenever this panel continues a place or a staging the reader has \
+    just been looking at, and to an earlier panel when a prop, location, costume \
+    detail, symbol, vehicle or artifact returns after a gap. Do not link for \
+    mood, theme or broad similarity alone, and do not link for characters, whose \
+    identity is held by their own reference images. Return an empty array when \
+    nothing earlier is needed.
   - scene_type: one of the allowed values in the response schema (at minimum \
     "still" and "video"). Default to "still". Mark a small number of pivotal \
     "hero" moments as "video" when motion would add real impact.
@@ -102,20 +156,199 @@ For each scene you must provide:
     version vs transformed version. Do NOT use state for clothing, armor, pose, \
     mood, lighting, temporary wounds, hairstyles, props, or scene-specific styling.
 
-Pace the total narration to fit the target duration the user provides \
-(assume roughly 2.5 spoken words per second). Also produce social metadata for \
+THE OPENING. A viewer in a feed decides whether to stay inside the first two \
+seconds, before the story has explained anything, so scene 1 is not the \
+beginning of the story — it is the argument for watching it. Three things carry \
+it, and all three must work on their own.
+
+First, hook_text: one short sentence, at most about ten words, burned across \
+the top of the frame for the opening two seconds. Write it as a concrete claim \
+with a consequence in it, not a question and not a label. "Zeus drowned every \
+human on earth" works; "The story of the great flood", "Greek mythology \
+explained" and "Who really rules Olympus?" do not, because a title names a \
+subject and a rhetorical question can be answered with a shrug and a scroll. \
+Name a specific person or thing, and say the surprising part out loud rather \
+than promising it is coming. It may spoil a late beat — a viewer who stays for \
+the spoiler is the point.
+
+Second, the first narration_text. Open on the sharpest concrete moment in the \
+whole story, even when that moment belongs chronologically later; the \
+background can follow once someone is listening. Do not open with scene \
+setting, a date, a genealogy, a "long ago" or an address to the audience. The \
+first spoken sentence should be able to stand alone as the reason to keep \
+watching, and it must not merely restate hook_text word for word — the eye and \
+the ear should get two different pieces of the same moment.
+
+Third, the first image_prompt, which is the single most important image in the \
+video. A viewer must be able to tell what they are looking at in a fraction of a \
+second on a phone, and the picture must carry either force or consequence. Build \
+it as one of the kinds below — whichever the sharpest moment of this story \
+genuinely is, and a different one from video to video.
+
+MOTION: a moment caught partway through. A blow landing, a body falling, a thing \
+shattering, a creature lunging into frame, someone running from what is already \
+at their heels. Weight in the air, cloth and hair thrown by the movement, the \
+action underway rather than about to begin.
+
+DOMINION: a figure holding the high ground over what they have done, or are \
+about to do. Put them high in the frame or at its near edge and keep them big \
+enough to read as a person — their build, their dress, the set of their \
+shoulders — and put the consequence below and beyond them, distant and small. \
+The charge comes from the drop between the two, so it is the world that goes \
+small and never the figure. Light them from behind and let their face be turned \
+away; what is withheld reads as power.
+
+ARRIVAL: something enormous entering the frame that the people in it have not \
+fully seen yet. A head above the treeline, a hand coming down through cloud, a \
+shadow falling across a crowd still looking the wrong way.
+
+AFTERMATH: the consequence by itself, with whoever caused it small or absent. A \
+petrified crowd, a drowned plain, a burnt hall. The viewer stays to find out \
+what did this.
+
+ARTIFACT: one object in extreme close-up at the moment it turns. Wax running off \
+a feather, a hand going to stone, an eye with fire in it. A frame this tight \
+stops a viewer but cannot hold one, so an opening like this gets a short first \
+narration line and reaches the person or the place in the very next panel.
+
+Commit to whichever kind you choose. A frame that is half action and half \
+portrait is neither, and reads as somebody posing. Keep one subject and one idea \
+in it: a second figure, a scatter of props and a landmark all competing in the \
+same opening is clutter, and clutter is the thing a viewer scrolls past.
+
+The frame needs one unmistakable focal point that separates from everything else \
+in brightness and not only in colour: a lit figure against dark, or a dark one \
+against fire, sky or dust. It has to stay readable as the thing it is — a person \
+must still show as a person, with a build and clothes you could describe, never \
+a speck somewhere in a landscape. Hold the light the rest of the video works in: \
+deep shadow with one hard source. Flat overhead noon daylight washes the \
+contrast out and drags the picture away from the series look. What always fails \
+is an abstraction with nothing in it to look at, whether smoke, cloud, mist, \
+void or swirl, and an empty background, and a crowd with no focal point. Write \
+this image in your own words for this particular story, and do not carry \
+phrasing over from these instructions.
+
+THE ENDING. The last scene closes the beat it is on and opens the next one. \
+End on the consequence that has not happened yet, the person who has not \
+arrived, or the price not yet paid, in one line that names it specifically. Do \
+not end with a summary of what was just told, a moral, or a request to follow, \
+like, or comment.
+
+Treat the target duration as a rough planning reference, never a hard cap. \
+Narrative clarity, comprehension, and a satisfying dramatic rhythm outrank \
+runtime; the project-specific prompt tells you how far the script may expand. \
+Also produce social metadata for \
 the finished video: a title, a description, and platform-appropriate hashtags. \
 Write one description that works as-is on every platform — it is used verbatim \
 as the YouTube description and as the TikTok caption, so do not write it for one \
 platform in particular and do not put the hashtags inside it (they are appended \
-automatically). Create thumbnail copy with two distinct levels: cover_kicker is a short, \
+automatically). Feeds truncate it after roughly the first line, so make that \
+first sentence do the work of a hook on its own and put the recap, if any, \
+after it. Never write a URL into the description. Create thumbnail copy with two distinct levels: cover_kicker is a short, \
 intriguing context line of 2-5 words, while cover_title is the bold 1-3 word \
-subject or name that should dominate the cover. Do not put "Part 1", "Part 2", \
+subject or name that should dominate the cover. cover_kicker is also set in \
+small capitals above hook_text on the opening card, so write it as the name of \
+the episode's arc or moment rather than as a sentence about it: "The Great \
+Flood", "The First Woman", "The War For Olympus". No verb, no punctuation, and \
+never the same words as cover_title or hook_text. Do not put "Part 1", "Part 2", \
 or similar series numbering in either field; the pipeline adds that separately.
+
+Every image_prompt and motion_prompt you write is sent to a moderated image or \
+video model, and a single rejected prompt fails the entire render, so keep them \
+safe for a general audience. Dress figures in the clothing of their own world — \
+drapery, chiton, robes, armor, furs, swaddling for an infant — fully covering, \
+in opaque fabric, and never describe a figure as nude, partly nude, undressed, \
+or sexualised. Write about the garments and how they hang, not about the parts \
+of the body they cover: "a heavy wool himation falling to her sandalled feet", \
+never a list of anatomy the cloth passes over. Never write that someone wears \
+only one thing, \
+and never call fabric sheer, translucent, gauzy, see-through, clinging, or \
+slipping: that phrasing alone gets the image refused, however it was meant. \
+A figure may be young, old, an infant, beautiful, or an object of desire in the \
+story — none of that is a problem, and you should not age anyone up or dress \
+them out of their own century to be safe. Where the tradition shows a figure \
+wearing very little, such as a goddess born from sea foam, keep what makes them \
+recognisable and let drapery, long hair, water, foam, mist, or a foreground \
+object carry the covering. Keep violence implied rather than shown: aftermath, \
+shadow, silhouette, posture, and the reaction on a face, instead of gore, open \
+wounds, dismemberment, or blood. This constrains only the visuals — the \
+narration may tell the story fully.
 
 Return ONLY the structured object defined by the response schema. Do not add \
 commentary before or after it.
 """
+
+
+# --------------------------------------------------------------------------- #
+# Content limits for the image/video models
+# --------------------------------------------------------------------------- #
+# Every hosted image model moderates its own input, and a rejection is a hard
+# stop for the pipeline step — there is no partial result and no retry of the
+# same prompt that will pass. Mythology and folklore are where this bites:
+# Aphrodite rising from the foam, a flayed titan, a battlefield. Stating the
+# limits costs one paragraph per request and turns most of those into a usable
+# picture instead of a content_policy failure. Applied at the adapter edge (see
+# adapters/image.py, adapters/video.py) so no prompt can route around it.
+#
+# MEASURED, and the reason every line below says what TO draw: these clauses are
+# read by the provider's own keyword filter before any image exists, and that
+# filter does not parse negation. Submitted against Krea, a clause spelling out
+# what to avoid was refused with content_policy ON ITS OWN — the prohibition
+# vocabulary is what it matched, so the guardrail became the trigger. The
+# positive phrasing here passes both alone and attached to a real prompt. Do not
+# reintroduce a "no <thing>" list here; put that guidance in the LLM-facing
+# prompts below, where the reader is a language model that understands "no".
+#
+# It is also deliberately narrow. An earlier draft demanded a "grown adult" in
+# "complete, opaque clothing", which is wrong twice over: myth is full of
+# infants and children (Hermes has a newborn form in the library), and burying
+# a figure the tradition depicts lightly dressed in full robes loses the figure.
+# The rule is coverage, not costume — the clothing named is the setting's own,
+# and where the source shows very little, the scene itself does the covering.
+#
+# It also names no body parts, which is the third thing measured here. A clause
+# reading "chest, hips and thighs stay behind opaque fabric" passed on its own
+# and against most prompts, but was refused whenever the description carried an
+# age cue — "a princess in her late teens" plus a second anatomy list reads as
+# something neither half means alone. Both halves are innocent; the pairing is
+# not. So the clause asks for full covering without inventorying what is
+# covered, which tested clean against youthful and adult descriptions alike.
+IMAGE_CONTENT_LIMITS = (
+    "Content limits (mandatory): keep this image suitable for a general "
+    "audience. Dress each figure in the clothing of their own world — "
+    "classical drapery, chiton and himation, robes, armor, furs, swaddling, "
+    "whatever the setting calls for — fully covering, in opaque fabric. Where "
+    "the source tradition shows a figure lightly dressed, keep them "
+    "recognisable as themselves and let flowing drapery, long hair, water, sea "
+    "foam, mist, cloud or foliage complete the covering. Keep any conflict "
+    "restrained, with figures whole and unharmed."
+)
+
+# The i2v model already has the picture, so the risk is narrower: a subject who
+# is fine in the start frame losing clothing over the clip. Kept short because
+# clip prompts are length-capped, and positive for the same measured reason.
+VIDEO_CONTENT_LIMITS = (
+    "Content limits (mandatory): everyone keeps the full, opaque clothing they "
+    "already wear in the start image, and the clip stays modest and suitable "
+    "for a general audience, with figures whole and unharmed."
+)
+
+
+def with_image_content_limits(prompt: str) -> str:
+    """Append the image content limits, once."""
+    return _append_once(prompt, IMAGE_CONTENT_LIMITS)
+
+
+def with_video_content_limits(prompt: str) -> str:
+    """Append the clip content limits, once."""
+    return _append_once(prompt, VIDEO_CONTENT_LIMITS)
+
+
+def _append_once(prompt: str, clause: str) -> str:
+    prompt = (prompt or "").strip()
+    if clause in prompt:
+        return prompt
+    return f"{prompt}\n\n{clause}" if prompt else clause
 
 
 # --------------------------------------------------------------------------- #
@@ -178,17 +411,23 @@ def _panel_guidance(panel_seconds: float) -> str:
     density and specificity — many short beats, each with a real place in it,
     instead of a handful of long scenes with vague backgrounds.
     """
+    floor, ceiling = panel_hold_band(panel_seconds)
     return (
         "## Panels (this group is read like a manhwa, not watched like a film)\n"
         "There is NO generated video in this group. Every scene is one still "
         "panel, and the only motion the viewer sees is the camera move applied "
         "over that panel at render time. Write accordingly.\n\n"
-        f"Break the story into many short beats — aim for roughly "
-        f"{panel_seconds:.0f} seconds of narration per panel, so a longer video "
-        "becomes a lot of panels rather than a few slow ones. A beat is one "
-        "moment: a decision, a reaction, an arrival, a line landing, a detail "
-        "the viewer should notice. When a sentence contains two moments, split "
-        "it into two panels.\n\n"
+        f"Aim for a {floor:.1f}-to-{ceiling:.1f}-second "
+        "hold for most panels, not a quota tied to the requested runtime. That is "
+        "long enough to read an image and short enough that the page keeps turning; "
+        "a panel held for ten seconds is what makes this format feel slow. Shorter "
+        "panels are reserved for a rare impact beat; longer ones need a deliberate "
+        "reason to linger. A panel may "
+        "carry two naturally connected sentences when they belong to "
+        "the same visual moment. Split when the place, action, point of "
+        "view, or emotional beat actually changes. Never turn every clause into "
+        "a new panel. The viewer needs time to read the image as well as hear the "
+        "words.\n\n"
         "Every image_prompt must put the panel somewhere specific. Name the "
         "place, the time of day, the weather, and what the light is doing, and "
         "describe the foreground, the middle ground and the background as "
@@ -203,6 +442,45 @@ def _panel_guidance(panel_seconds: float) -> str:
         "panels at the same scale in a row. The same applies to camera_move — "
         "choose the one that fits each beat and keep it changing, and use "
         "punch_in for the moments that are meant to hit."
+    )
+
+
+def _duration_guidance(target_duration_seconds: int) -> str:
+    """Make runtime elastic without inviting padding or an unfocused script.
+
+    The ceiling is the same multiple the automatic review measures against
+    (services.pacing.MAX_RUNTIME_FACTOR), so a draft is not first invited to a
+    length that is then sent back for a rewrite.
+    """
+    upper = max(target_duration_seconds, round(target_duration_seconds * MAX_RUNTIME_FACTOR))
+    return (
+        "## Runtime and listening pace (higher priority than platform length rules)\n"
+        f"The requested {target_duration_seconds}-second duration is a rough "
+        "short-form reference, NOT a deadline and NOT a word budget. The finished "
+        f"narration may run longer when the story genuinely needs it, up to about "
+        f"{upper} seconds ({upper // 60}:{upper % 60:02d}) — but that is a ceiling, "
+        "not a destination. Most scripts should land nearer the reference. Never "
+        "add filler merely to make it longer.\n\n"
+        "This is watched in a feed, so it has to keep moving. Say things once. "
+        "Cut recap, restatement, scene-setting the payoff does not need, and "
+        "stacked adjectives. Prefer concrete verbs and sentences that carry the "
+        "story forward.\n\n"
+        "Within that, optimize for comprehension at a calm, dramatic spoken pace. "
+        "Do not compress a chain of causes, transformations, unfamiliar names, or "
+        "locations into a rapid chronicle just to hit the reference. Introduce "
+        "one unfamiliar idea, let its consequence or human reaction land, then "
+        "move on. Energy should come from stakes and specificity, not from racing "
+        "through facts."
+    )
+
+
+def _pacing_feedback_block(feedback: str) -> str:
+    return (
+        "## Automatic pacing review of the previous draft\n"
+        "The previous draft was rejected before audio or images were generated. "
+        "Rewrite the entire script and fix this measured pacing problem without "
+        "dropping essential story beats:\n"
+        f"{feedback.strip()}"
     )
 
 
@@ -234,6 +512,7 @@ def build_script_prompt(
     revision_notes: str = "",
     panels_mode: bool = False,
     panel_seconds: float = 4.0,
+    pacing_feedback: str = "",
 ) -> str:
     """Assemble the full user-facing instruction: platform + content + project.
 
@@ -252,6 +531,7 @@ def build_script_prompt(
         content_prompt.strip() or "(no content guidance provided)",
         "",
     ]
+    parts += [_duration_guidance(target_duration_seconds), ""]
     if enable_animations:
         parts += [_animation_guidance(latex_available), ""]
     if panels_mode:
@@ -259,7 +539,7 @@ def build_script_prompt(
     parts += [
         "## This project",
         f"Topic / idea: {topic.strip()}",
-        f"Target duration: about {target_duration_seconds} seconds.",
+        f"Rough duration reference: about {target_duration_seconds} seconds (elastic as described above).",
         "",
         "Write the full narrated script now, following the platform conventions "
         "and content tone above, and return the structured scene list plus social "
@@ -287,6 +567,8 @@ def build_script_prompt(
         "object, place, artifact, costume detail, symbol, vehicle, or environment. "
         "Use an empty array for ordinary scene-to-scene flow or vague similarity.",
     ]
+    if pacing_feedback.strip():
+        parts += ["", _pacing_feedback_block(pacing_feedback)]
     if revision_notes.strip():
         parts += ["", _revision_notes_block(revision_notes)]
     return "\n".join(parts)
@@ -318,7 +600,17 @@ SCRIPT_JSON_SCHEMA: dict = {
                     },
                     "transition": {
                         "type": "string",
-                        "enum": ["cut", "fade", "slide_up", "slide_left", "flash"],
+                        "enum": ["cut", "fade", "slide_up", "slide_left", "flash",
+                                 "whip_pan", "impact_cut"],
+                    },
+                    "beat_id": {"type": "string"},
+                    "motion_fx": {
+                        "type": "string",
+                        "enum": ["none", "speed_lines", "impact_shake", "motion_blur"],
+                    },
+                    "grade": {
+                        "type": "string",
+                        "enum": ["none", "warm", "cold", "blood", "moonlight", "memory"],
                     },
                     "continuity_context": {
                         "type": "array",
@@ -354,7 +646,7 @@ SCRIPT_JSON_SCHEMA: dict = {
                 },
                 "required": [
                     "narration_text", "image_prompt", "motion_prompt", "camera_move",
-                    "particles", "transition",
+                    "particles", "transition", "beat_id", "motion_fx", "grade",
                     "continuity_context", "scene_type", "characters",
                 ],
                 "additionalProperties": False,
@@ -371,7 +663,7 @@ SCRIPT_JSON_SCHEMA: dict = {
                 "cover_title": {"type": "string"},
             },
             "required": [
-                "title", "description", "hashtags",
+                "title", "description", "hashtags", "hook_text",
                 "cover_kicker", "cover_title"
             ],
             "additionalProperties": False,

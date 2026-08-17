@@ -373,7 +373,7 @@ function EditorialCard({
         {item.ai_rationale && <div className="ai-rationale">Why this comes next: {item.ai_rationale}</div>}
         <div className="editorial-card-meta">
           <span>{item.source_type}</span>
-          <span>{item.target_duration_seconds}s target</span>
+          <span>{item.target_duration_seconds}s rough length</span>
           {item.external_url && <a href={item.external_url} target="_blank" rel="noreferrer">External link</a>}
         </div>
         <div className="editorial-card-actions">
@@ -546,7 +546,7 @@ function WorkModal({ planId, item, onClose, onSaved }) {
       <div className="inline-fields">
         <div className="field"><label>Part group</label><input placeholder="e.g. Titanomachy" {...field("part_group_title")} /></div>
         <div className="field"><label>Part number</label><input type="number" min="1" {...field("part_number")} /></div>
-        <div className="field"><label>Target seconds</label><input type="number" min="15" max="600" {...field("target_duration_seconds")} /></div>
+        <div className="field"><label>Rough seconds</label><input type="number" min="15" max="600" {...field("target_duration_seconds")} /></div>
       </div>
       <div className="field"><label>Internal notes</label><textarea rows={2} {...field("notes")} /></div>
       {save.isError && <div className="banner">{String(save.error.message)}</div>}

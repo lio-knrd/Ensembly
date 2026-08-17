@@ -13,6 +13,12 @@ DEFAULT_MUSIC_SETTING = "default_music_track_id"
 WHISPER_TRACK_ID = "builtin-whisper-in-the-deep"
 WHISPER_PROVIDER_ID = "whisper-in-the-deep"
 WHISPER_PATH = "data/music/whisper-in-the-deep.mp3"
+# Real provenance for the bundled track, so the rendered credit names where it
+# actually came from instead of the placeholder "Local library".
+WHISPER_TITLE = "Whisper In The Deep"
+WHISPER_ARTIST = "Royalty Free Zone - Epic Journey"
+WHISPER_SOURCE_URL = "https://www.youtube.com/watch?v=cqMbxcC5LMU"
+WHISPER_CREDIT_SETTING = "whisper_credit_corrected"
 
 
 def seed_local_library(session: Session) -> None:
@@ -25,17 +31,31 @@ def seed_local_library(session: Session) -> None:
                 id=WHISPER_TRACK_ID,
                 provider="local",
                 provider_track_id=WHISPER_PROVIDER_ID,
-                title="Whisper in the Deep",
-                artist_name="Local library",
+                title=WHISPER_TITLE,
+                artist_name=WHISPER_ARTIST,
                 duration_seconds=192,
                 license_url="royalty-free",
                 download_allowed=True,
                 local_path=WHISPER_PATH,
+                share_url=WHISPER_SOURCE_URL,
             )
         )
 
     if session.get(Setting, DEFAULT_MUSIC_SETTING) is None:
         session.add(Setting(key=DEFAULT_MUSIC_SETTING, value=json.dumps(WHISPER_TRACK_ID)))
+
+
+def correct_whisper_credit(session: Session) -> None:
+    """Replace the placeholder attribution on already-seeded databases, once."""
+    if session.get(Setting, WHISPER_CREDIT_SETTING) is not None:
+        return
+    track = session.get(MusicTrack, WHISPER_TRACK_ID)
+    if track and track.artist_name in ("", "Local library"):
+        track.title = WHISPER_TITLE
+        track.artist_name = WHISPER_ARTIST
+        track.share_url = WHISPER_SOURCE_URL
+        session.add(track)
+    session.add(Setting(key=WHISPER_CREDIT_SETTING, value=json.dumps(True)))
 
 
 def default_track(session: Session) -> MusicTrack | None:

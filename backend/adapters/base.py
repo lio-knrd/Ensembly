@@ -20,6 +20,12 @@ class GeneratedScene:
     # Extra layers over the camera move, both off by default. See models.
     particles: str = "none"
     transition: str = "cut"
+    motion_fx: str = "none"
+    grade: str = "none"
+    # Which continuous scene this panel belongs to. Consecutive panels sharing
+    # one are read as one moment seen from several angles rather than as
+    # separate illustrations. Empty means the panel stands alone.
+    beat_id: str = ""
     characters: list[dict] = field(default_factory=list)
     continuity_context: list[dict] = field(default_factory=list)
     # Present only for scene_type == "animation": {"code", "title"} — AI-authored
@@ -63,7 +69,15 @@ class TTSGenerator(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    def synthesize(self, text: str, audio_out: Path, timestamps_out: Path) -> TTSResult:
+    def synthesize(
+        self,
+        text: str,
+        audio_out: Path,
+        timestamps_out: Path,
+        *,
+        previous_text: str = "",
+        next_text: str = "",
+    ) -> TTSResult:
         ...
 
 
@@ -76,6 +90,7 @@ class ImageGenerator(ABC):
         prompt: str,
         out_path: Path,
         reference_images: list[Path] | None = None,
+        reference_strengths: list[float] | None = None,
     ) -> Path:
         ...
 

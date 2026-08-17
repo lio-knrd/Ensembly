@@ -3,9 +3,17 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .models import CameraMove, Particles, SceneType, Transition, VisualMode
+from .models import (
+    CameraMove,
+    Grade,
+    MotionFx,
+    Particles,
+    SceneType,
+    Transition,
+    VisualMode,
+)
 
 
 # --- Projects ---
@@ -100,6 +108,8 @@ class SceneUpdate(BaseModel):
     camera_move: Optional[CameraMove] = None
     particles: Optional[Particles] = None
     transition: Optional[Transition] = None
+    motion_fx: Optional[MotionFx] = None
+    grade: Optional[Grade] = None
     continuity_context: Optional[list[dict]] = None
     scene_type: Optional[SceneType] = None
     animation_spec: Optional[dict] = None
@@ -153,6 +163,7 @@ class ContentPresetIn(BaseModel):
     panel_seconds: float = 4.0
     panel_parallax: bool = True
     voice_id: str = ""
+    voice_speed: float = Field(default=1.0, ge=0.7, le=1.2)
     enable_animations: bool = False
     is_default: bool = False
 

@@ -11,8 +11,22 @@ from sqlmodel import Session, select
 
 from .config import settings
 from .database import engine
-from .models import ContentPreset, PlatformPreset, Setting, VisualMode
-from .services.music_library import backfill_legacy_defaults, seed_local_library
+from .models import (
+    Character,
+    CharacterForm,
+    ContentPreset,
+    EditorialItem,
+    PlatformPreset,
+    Project,
+    Setting,
+    VisualMode,
+)
+from .services.music_library import (
+    backfill_legacy_defaults,
+    correct_whisper_credit,
+    seed_local_library,
+)
+from .services.typography import dashless
 
 # --------------------------------------------------------------------------- #
 # Motion house styles
@@ -123,6 +137,7 @@ DEFAULT_CONTENT = ContentPreset(
     # the camera move over each panel. Kept as this group's default because it
     # is what the channel actually ships.
     visual_mode=VisualMode.PANELS,
+    panel_seconds=4.0,
     voice_id=settings.elevenlabs_voice_id,
 )
 
@@ -202,10 +217,79 @@ def switch_mythology_to_panels(session: Session) -> None:
     session.add(Setting(key="mythology_panels_mode", value=json.dumps(True)))
 
 
+def relax_mythology_pacing(session: Session) -> None:
+    """Ship the more readable panel cadence to the existing mythology group once."""
+    if session.get(Setting, "mythology_relaxed_pacing") is not None:
+        return
+    preset = session.exec(
+        select(ContentPreset).where(ContentPreset.name == DEFAULT_CONTENT.name)
+    ).first()
+    if preset:
+        preset.panel_seconds = 6.0
+        session.add(preset)
+    session.add(Setting(key="mythology_relaxed_pacing", value=json.dumps(True)))
+
+
+def tighten_mythology_pacing(session: Session) -> None:
+    """Take the mythology group back off its six-second panel hold, once.
+
+    Six seconds was a correction to panels that flew past too fast, and it
+    overshot: with the hold band on top, finished videos were holding images for
+    ten seconds and running past four minutes. Four brings the cadence back to
+    something a feed viewer stays with. One-time and marker-guarded, like the
+    change it replaces, so a creator who sets their own hold keeps it.
+    """
+    if session.get(Setting, "mythology_tightened_pacing") is not None:
+        return
+    preset = session.exec(
+        select(ContentPreset).where(ContentPreset.name == DEFAULT_CONTENT.name)
+    ).first()
+    if preset and preset.panel_seconds >= 6.0:
+        preset.panel_seconds = DEFAULT_CONTENT.panel_seconds
+        session.add(preset)
+    session.add(Setting(key="mythology_tightened_pacing", value=json.dumps(True)))
+
+
+# Copy a model wrote and a human reads. Prompts, narration and soundtrack
+# credits are deliberately absent: the first two are instructions to a model,
+# and the third is a licence obligation to reproduce a credit as given.
+_DASHLESS_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
+    (Project, ("title_card_kicker", "title_card_text", "title_card_part_label")),
+    (EditorialItem, ("title", "summary", "coverage_summary", "part_group_title",
+                     "ai_rationale")),
+    (Character, ("description",)),
+    (CharacterForm, ("description",)),
+)
+
+
+def dedash_existing_copy(session: Session) -> None:
+    """Take the dashes out of copy written before the rule existed, once.
+
+    New copy is cleaned where it is authored (services.typography), which does
+    nothing for the plans, characters and covers already sitting in the app. A
+    title a creator typed themselves is left exactly as they typed it.
+    """
+    if session.get(Setting, "dedashed_existing_copy") is not None:
+        return
+    for model, fields in _DASHLESS_FIELDS:
+        for row in session.exec(select(model)).all():
+            for field in fields:
+                value = getattr(row, field, None)
+                if isinstance(value, str) and dashless(value) != value:
+                    setattr(row, field, dashless(value))
+                    session.add(row)
+    for project in session.exec(select(Project)).all():
+        if not project.title_is_custom and dashless(project.title) != project.title:
+            project.title = dashless(project.title)
+            session.add(project)
+    session.add(Setting(key="dedashed_existing_copy", value=json.dumps(True)))
+
+
 def seed() -> None:
     with Session(engine) as session:
         seed_local_library(session)
         session.flush()
+        correct_whisper_credit(session)
         backfill_legacy_defaults(session)
         if not session.exec(select(PlatformPreset)).first():
             session.add(DEFAULT_PLATFORM)
@@ -223,8 +307,17 @@ def seed() -> None:
         session.flush()
         backfill_motion_styles(session)
         switch_mythology_to_panels(session)
+        relax_mythology_pacing(session)
+        tighten_mythology_pacing(session)
+        dedash_existing_copy(session)
         for key, value in DEFAULT_SETTINGS.items():
             existing = session.get(Setting, key)
             if existing is None:
                 session.add(Setting(key=key, value=json.dumps(value)))
         session.commit()
+    # Runs after the commit because it reads the corrected track metadata and
+    # writes files rather than rows. Idempotent, so no one-shot marker: a later
+    # change to the credit wording is picked up by old projects on the next start.
+    from .pipeline import refresh_music_attribution
+
+    refresh_music_attribution()

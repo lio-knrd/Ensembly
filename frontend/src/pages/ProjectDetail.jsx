@@ -65,7 +65,7 @@ export default function ProjectDetail() {
           <div className="detail-sub">
             <span>{project.topic_prompt}</span>
             <span className="sep" />
-            <span>{project.target_duration_seconds}s target</span>
+            <span>{project.target_duration_seconds}s rough length</span>
             {visualStyle && (
               <span className="style-chip" title={visualStyle}>
                 Style: {project.content_preset_name || "content preset"}
@@ -102,7 +102,7 @@ export default function ProjectDetail() {
 
       {project.error && <div className="banner">Error: {project.error}</div>}
 
-      {project.stage === "CAST_REVIEW" && <CastPanel project={project} visualStyle={visualStyle} />}
+      {showCastPanel(project) && <CastPanel project={project} visualStyle={visualStyle} />}
 
       {project.stage === "DONE" && (
         <FinalPanel project={project} metadata={metadata} />
@@ -128,6 +128,15 @@ export default function ProjectDetail() {
 
 function showRenderPanels(stage) {
   return !["IDEA", "SCRIPT_GENERATING"].includes(stage);
+}
+
+// A sheet an image model refuses leaves the project FAILED, which used to hide
+// the panel holding the prompt that caused it. Keep the panel up so the prompt
+// can be edited and the sheet retried from the same place.
+function showCastPanel(project) {
+  if (project.stage === "CAST_REVIEW") return true;
+  const interrupted = project.canceled_stage || project.failed_stage;
+  return ["FAILED", "CANCELED"].includes(project.stage) && interrupted === "CAST_REVIEW";
 }
 
 function TitleCardPanel({ project, scenes }) {
@@ -609,6 +618,7 @@ function CastPanel({ project, visualStyle }) {
 
   const missing = cast.filter((c) => !c.has_sheet).length;
   const busy = (project.status_message || "").startsWith("Generating");
+  const failedOn = failedCastMember(project);
 
   return (
     <div className="panel">
@@ -616,7 +626,9 @@ function CastPanel({ project, visualStyle }) {
         <div style={{ maxWidth: 560 }}>
           <h2>Character sheets</h2>
           <p className="panel-sub" style={{ margin: 0 }}>
-            {cast.length === 0
+            {failedOn
+              ? `The image model rejected the sheet for ${failedOn}. Open its prompt below, edit what the model objected to, and generate that sheet again.`
+              : cast.length === 0
               ? "The script references no characters, so there is nothing to lock in."
               : missing
               ? `${missing} of ${cast.length} character${cast.length === 1 ? "" : "s"} still need a reference sheet. Sheets keep each character's look consistent across every scene (visual style comes from the content preset).`
@@ -659,7 +671,14 @@ function CastPanel({ project, visualStyle }) {
       {cast.length > 0 && (
         <div className="cast-grid">
           {cast.map((c) => (
-            <CastCard key={c.key || `${c.name}-${c.state || "default"}`} projectId={id} member={c} onDone={invalidate} busy={busy} />
+            <CastCard
+              key={c.key || `${c.name}-${c.state || "default"}`}
+              projectId={id}
+              member={c}
+              onDone={invalidate}
+              busy={busy}
+              rejected={failedOn === castLabel(c)}
+            />
           ))}
         </div>
       )}
@@ -667,14 +686,37 @@ function CastPanel({ project, visualStyle }) {
   );
 }
 
-function CastCard({ projectId, member, onDone, busy }) {
+function castLabel(member) {
+  return member.state ? `${member.name} (${member.state})` : member.name;
+}
+
+// The pipeline reports a rejected sheet as "character sheet for <label>: ...",
+// so the banner already names the character; this pulls the same label back out
+// to mark the one card that needs attention.
+function failedCastMember(project) {
+  if (project.stage !== "FAILED") return "";
+  const match = /character sheet for (.+?):/.exec(project.error || "");
+  return match ? match[1] : "";
+}
+
+function CastCard({ projectId, member, onDone, busy, rejected }) {
   const [description, setDescription] = useState(member.description || "");
+  const [prompt, setPrompt] = useState(member.reference_prompt || "");
+  // null means "not touched yet", so a rejection that arrives after mount still
+  // opens the prompt, while an explicit toggle always wins.
+  const [promptOpen, setPromptOpen] = useState(null);
+  const showPrompt = promptOpen === null ? Boolean(rejected) : promptOpen;
+  // Only override when the creator actually changed the prompt; otherwise the
+  // pipeline rebuilds it from the description, which is what editing the notes
+  // above is for.
+  const promptEdited = prompt.trim() !== (member.reference_prompt || "").trim();
   const gen = useMutation({
     mutationFn: () =>
       api.generateCastSheet(projectId, {
         name: member.name,
         state: member.state || "",
         description: description.trim() || null,
+        prompt: promptEdited ? prompt.trim() : null,
         generate_description: !description.trim(),
       }),
     onSuccess: onDone,
@@ -691,7 +733,7 @@ function CastCard({ projectId, member, onDone, busy }) {
   const variants = member.reference_variants || [];
 
   return (
-    <div className={"cast-card" + (member.has_sheet ? "" : " missing")}>
+    <div className={"cast-card" + (member.has_sheet ? "" : " missing") + (rejected ? " rejected" : "")}>
       <div className="cast-sheet-column">
       <div
         className="cast-thumb"
@@ -719,7 +761,9 @@ function CastCard({ projectId, member, onDone, busy }) {
       <div className="cast-info">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h4>{member.state ? `${member.name} / ${member.state}` : member.name}</h4>
-          {member.has_sheet ? (
+          {rejected ? (
+            <span className="cast-missing-tag">rejected</span>
+          ) : member.has_sheet ? (
             <span className="tag">ready</span>
           ) : (
             <span className="cast-missing-tag">no sheet</span>
@@ -737,6 +781,31 @@ function CastCard({ projectId, member, onDone, busy }) {
           placeholder="Appearance notes; leave blank to let the AI describe"
           onChange={(e) => setDescription(e.target.value)}
         />
+        {member.reference_prompt && (
+          <button
+            type="button"
+            className="btn ghost sm cast-prompt-toggle"
+            onClick={() => setPromptOpen(!showPrompt)}
+          >
+            {showPrompt ? "Hide image prompt" : "Edit image prompt"}
+          </button>
+        )}
+        {showPrompt && (
+          <>
+            <textarea
+              className="cast-prompt"
+              rows={8}
+              value={prompt}
+              placeholder="The exact prompt sent to the image model"
+              onChange={(e) => setPrompt(e.target.value)}
+            />
+            <div className="cast-prompt-note">
+              {promptEdited
+                ? "This exact text is sent to the image model; the appearance notes above are ignored."
+                : "Unedited, so the prompt is rebuilt from the appearance notes above."}
+            </div>
+          </>
+        )}
         <button
           className="btn sm"
           disabled={busy || gen.isPending}
@@ -1006,7 +1075,7 @@ function sampleCaptionLines(scenes) {
 function SubtitlesPanel({ project, scenes }) {
   const qc = useQueryClient();
   const projectQueryKey = ["project", project.id];
-  const defaultPosition = project.subtitle_position_default ?? 0.128;
+  const defaultPosition = project.subtitle_position_default ?? 0.22;
   const minPosition = project.subtitle_position_min ?? 0.02;
   const maxPosition = project.subtitle_position_max ?? 0.85;
   const clamp = (value) => Math.min(Math.max(value, minPosition), maxPosition);
@@ -1565,6 +1634,24 @@ const TRANSITIONS = [
   ["slide_up", "Slide up"],
   ["slide_left", "Slide left"],
   ["flash", "Flash"],
+  ["whip_pan", "Whip pan"],
+  ["impact_cut", "Impact cut"],
+];
+
+const GRADES = [
+  ["none", "None"],
+  ["warm", "Warm"],
+  ["cold", "Cold"],
+  ["blood", "Blood"],
+  ["moonlight", "Moonlight"],
+  ["memory", "Memory"],
+];
+
+const MOTION_FX = [
+  ["none", "None"],
+  ["speed_lines", "Speed lines"],
+  ["impact_shake", "Impact shake"],
+  ["motion_blur", "Motion blur"],
 ];
 
 function SceneCard({
@@ -1847,6 +1934,14 @@ function SceneCard({
           </div>
           {scene.scene_type === "still" && (
             <>
+              {scene.beat_id && (
+                <span
+                  className="scene-beat-tag"
+                  title="Panels sharing a beat are one continuous scene. Each one after the first is generated with the previous panel attached as a reference, so the place, light and palette carry over."
+                >
+                  Beat: {scene.beat_id}
+                </span>
+              )}
               <label
                 className="scene-camera-move"
                 title="The camera move applied over this picture in the final render. It is the only motion a still scene has, so vary it from scene to scene."
@@ -1873,6 +1968,36 @@ function SceneCard({
                   onChange={(e) => save.mutate({ particles: e.target.value })}
                 >
                   {PARTICLE_KINDS.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label
+                className="scene-camera-move"
+                title="A colour treatment for this panel's mood. Belongs to a whole beat, so panels in the same beat should share one."
+              >
+                <span>Grade</span>
+                <select
+                  value={scene.grade || "none"}
+                  disabled={save.isPending || busy}
+                  onChange={(e) => save.mutate({ grade: e.target.value })}
+                >
+                  {GRADES.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label
+                className="scene-camera-move"
+                title="An impact effect drawn over this panel. Unlike particles it hits in the first half second and is gone, so it belongs on the panel where something actually lands."
+              >
+                <span>Impact</span>
+                <select
+                  value={scene.motion_fx || "none"}
+                  disabled={save.isPending || busy}
+                  onChange={(e) => save.mutate({ motion_fx: e.target.value })}
+                >
+                  {MOTION_FX.map(([value, label]) => (
                     <option key={value} value={value}>{label}</option>
                   ))}
                 </select>

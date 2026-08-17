@@ -90,11 +90,11 @@ def get_script_generator() -> ScriptGenerator:
     raise RuntimeError("No LLM API key configured and offline fallback disabled.")
 
 
-def get_tts_generator(voice_id: str | None = None) -> TTSGenerator:
+def get_tts_generator(voice_id: str | None = None, speed: float = 1.0) -> TTSGenerator:
     if settings.elevenlabs_api_key:
-        return ElevenLabsTTSGenerator(voice_id=voice_id)
+        return ElevenLabsTTSGenerator(voice_id=voice_id, speed=speed)
     if _offline_ok():
-        return OfflineTTSGenerator()
+        return OfflineTTSGenerator(speed=speed)
     raise RuntimeError("No ElevenLabs API key configured and offline fallback disabled.")
 
 

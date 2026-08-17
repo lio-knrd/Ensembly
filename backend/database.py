@@ -20,6 +20,7 @@ _ADDED_COLUMNS = [
     ("content_presets", "panel_seconds", "REAL DEFAULT 4.0"),
     ("content_presets", "panel_parallax", "BOOLEAN DEFAULT 1"),
     ("content_presets", "voice_id", "TEXT DEFAULT ''"),
+    ("content_presets", "voice_speed", "REAL DEFAULT 1.0"),
     ("characters", "reference_prompt", "TEXT DEFAULT ''"),
     ("characters", "reference_style_prompt", "TEXT DEFAULT ''"),
     ("characters", "reference_version", "INTEGER DEFAULT 0"),
@@ -37,6 +38,10 @@ _ADDED_COLUMNS = [
     ("scenes", "camera_move", "TEXT DEFAULT 'PUSH_IN'"),
     ("scenes", "particles", "TEXT DEFAULT 'NONE'"),
     ("scenes", "transition", "TEXT DEFAULT 'CUT'"),
+    # Plain string, not an enum: the script model invents the beat names.
+    ("scenes", "beat_id", "TEXT DEFAULT ''"),
+    ("scenes", "motion_fx", "TEXT DEFAULT 'NONE'"),
+    ("scenes", "grade", "TEXT DEFAULT 'NONE'"),
     ("scenes", "image_variants", "JSON DEFAULT '[]'"),
     ("scenes", "clip_variants", "JSON DEFAULT '[]'"),
     ("scenes", "video_request_id", "TEXT DEFAULT NULL"),
